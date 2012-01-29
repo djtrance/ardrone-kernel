@@ -698,14 +698,6 @@ static int alloc_raw_buffers(AR_SOFTC_T *ar)
     return 0;
 }
 
-static const struct net_device_ops ar6000_netdev_ops = {
-    .ndo_init = &ar6000_init,
-    .ndo_open = &ar6000_open,
-    .ndo_stop = &ar6000_close,
-    .ndo_start_xmit = &ar6000_data_tx,
-    .ndo_get_stats = &ar6000_get_stats,
-    .ndo_do_ioctl = &ar6000_ioctl,
-};
 /*
  * HTC Event handlers
  */
@@ -863,7 +855,13 @@ ar6000_avail_ev(HTC_HANDLE HTCHandle)
 
     spin_lock_init(&ar->arLock);
 
-    dev->netdev_ops = &ar6000_netdev_ops;
+    dev->init = &ar6000_init;
+    dev->open = &ar6000_open;
+    dev->stop = &ar6000_close;
+    dev->hard_start_xmit = &ar6000_data_tx;
+    dev->get_stats = &ar6000_get_stats;
+    dev->do_ioctl = &ar6000_ioctl;
+
     dev->watchdog_timeo = AR6000_TX_TIMEOUT;
     ar6000_ioctl_iwsetup(&ath_iw_handler_def);
     dev->wireless_handlers = &ath_iw_handler_def;
