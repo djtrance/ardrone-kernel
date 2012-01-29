@@ -3,17 +3,17 @@
  * Copyright (c) 2004-2007 Atheros Communications Inc.
  * All rights reserved.
  *
- * 
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License version 2 as
-// published by the Free Software Foundation;
-//
-// Software distributed under the License is distributed on an "AS
-// IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// rights and limitations under the License.
-//
-//
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 as
+ *  published by the Free Software Foundation;
+ *
+ *  Software distributed under the License is distributed on an "AS
+ *  IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ *  implied. See the License for the specific language governing
+ *  rights and limitations under the License.
+ *
+ *
  *
  */
 
@@ -23,9 +23,8 @@ static A_UINT8 bcast_mac[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 static void ar6000_set_quality(struct iw_quality *iq, A_INT8 rssi);
 extern unsigned int wmitimeout;
 extern A_WAITQUEUE_HEAD arEvent;
+extern wait_queue_head_t ar6000_scan_queue;
 
-
-#if WIRELESS_EXT > 14
 /*
  * Encode a WPA or RSN information element as a custom
  * element using the hostap format.
@@ -45,373 +44,161 @@ encode_ie(void *buf, size_t bufsize,
     bufsize -= leader_len;
     p += leader_len;
     for (i = 0; i < ielen && bufsize > 2; i++)
-    {
         p += sprintf(p, "%02x", ie[i]);
-        bufsize -= 2;
-    }
     return (i == ielen ? p - (u_int8_t *)buf : 0);
 }
-#endif /* WIRELESS_EXT > 14 */
 
 void
 ar6000_scan_node(void *arg, bss_t *ni)
 {
     struct iw_event iwe;
 #if WIRELESS_EXT > 14
-    char buf[256];
+    char buf[64*2 + 30];
 #endif
     struct ar_giwscan_param *param;
     A_CHAR *current_ev;
     A_CHAR *end_buf;
     struct ieee80211_common_ie  *cie;
-    A_CHAR *current_val;
-    A_INT32 j;
-    A_UINT32 rate_len, data_len = 0;
+	struct iw_request_info info;
+
+	info.cmd = 0;
+	info.flags = 0;
 
     param = (struct ar_giwscan_param *)arg;
+
+    if (param->current_ev >= param->end_buf) {
+        return;
+    }
+    if ((param->firstPass == TRUE) &&
+        ((ni->ni_cie.ie_wpa == NULL) && (ni->ni_cie.ie_rsn == NULL))) {
+        /*
+         * Only forward wpa bss's in first pass
+         */
+        return;
+    }
+
+     if ((param->firstPass == FALSE) &&
+        ((ni->ni_cie.ie_wpa != NULL) || (ni->ni_cie.ie_rsn != NULL))) {
+        /*
+         * Only forward non-wpa bss's in 2nd pass
+         */
+        return;
+    }
 
     current_ev = param->current_ev;
     end_buf = param->end_buf;
 
     cie = &ni->ni_cie;
 
-    if ((end_buf - current_ev) > IW_EV_ADDR_LEN)
-    {
-        A_MEMZERO(&iwe, sizeof(iwe));
-        iwe.cmd = SIOCGIWAP;
-        iwe.u.ap_addr.sa_family = ARPHRD_ETHER;
-        A_MEMCPY(iwe.u.ap_addr.sa_data, ni->ni_macaddr, 6);
-        current_ev = iwe_stream_add_event(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe,
-                          IW_EV_ADDR_LEN);
-    }
-    param->bytes_needed += IW_EV_ADDR_LEN;
+    A_MEMZERO(&iwe, sizeof(iwe));
+    iwe.cmd = SIOCGIWAP;
+    iwe.u.ap_addr.sa_family = ARPHRD_ETHER;
+    A_MEMCPY(iwe.u.ap_addr.sa_data, ni->ni_macaddr, 6);
+    current_ev = iwe_stream_add_event(&info, current_ev, end_buf, &iwe,
+                                      IW_EV_ADDR_LEN);
 
-    data_len = cie->ie_ssid[1] + IW_EV_POINT_LEN;
-    if ((end_buf - current_ev) > data_len)
-    {
-        A_MEMZERO(&iwe, sizeof(iwe));
-        iwe.cmd = SIOCGIWESSID;
-        iwe.u.data.flags = 1;
-        iwe.u.data.length = cie->ie_ssid[1];
-        current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe,
-                          &cie->ie_ssid[2]);
-    }
-    param->bytes_needed += data_len;
+    A_MEMZERO(&iwe, sizeof(iwe));
+    iwe.cmd = SIOCGIWESSID;
+    iwe.u.data.flags = 1;
+    iwe.u.data.length = cie->ie_ssid[1];
+    current_ev = iwe_stream_add_point(&info, current_ev, end_buf, &iwe,
+                                      &cie->ie_ssid[2]);
 
     if (cie->ie_capInfo & (IEEE80211_CAPINFO_ESS|IEEE80211_CAPINFO_IBSS)) {
-        if ((end_buf - current_ev) > IW_EV_UINT_LEN)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = SIOCGIWMODE;
-            iwe.u.mode = cie->ie_capInfo & IEEE80211_CAPINFO_ESS ?
-                         IW_MODE_MASTER : IW_MODE_ADHOC;
-            current_ev = iwe_stream_add_event(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe,
-                          IW_EV_UINT_LEN);
-        }
-        param->bytes_needed += IW_EV_UINT_LEN;
-    }
-
-    if ((end_buf - current_ev) > IW_EV_FREQ_LEN)
-    {
         A_MEMZERO(&iwe, sizeof(iwe));
-        iwe.cmd = SIOCGIWFREQ;
-        iwe.u.freq.m = cie->ie_chan * 100000;
-        iwe.u.freq.e = 1;
-        current_ev = iwe_stream_add_event(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe,
-                          IW_EV_FREQ_LEN);
+        iwe.cmd = SIOCGIWMODE;
+        iwe.u.mode = cie->ie_capInfo & IEEE80211_CAPINFO_ESS ?
+                IW_MODE_MASTER : IW_MODE_ADHOC;
+        current_ev = iwe_stream_add_event(&info, current_ev, end_buf, &iwe,
+                                          IW_EV_UINT_LEN);
     }
-    param->bytes_needed += IW_EV_FREQ_LEN;
 
-    if ((end_buf - current_ev) > IW_EV_QUAL_LEN)
-    {
-        A_MEMZERO(&iwe, sizeof(iwe));
-        iwe.cmd = IWEVQUAL;
-        ar6000_set_quality(&iwe.u.qual, ni->ni_snr);
-        current_ev = iwe_stream_add_event(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe,
-                          IW_EV_QUAL_LEN);
-    }
-    param->bytes_needed += IW_EV_QUAL_LEN;
-
-    if ((end_buf - current_ev) > IW_EV_POINT_LEN)
-    {
-        A_MEMZERO(&iwe, sizeof(iwe));
-        iwe.cmd = SIOCGIWENCODE;
-        if (cie->ie_capInfo & IEEE80211_CAPINFO_PRIVACY) {
-            iwe.u.data.flags = IW_ENCODE_ENABLED | IW_ENCODE_NOKEY;
-        } else {
-            iwe.u.data.flags = IW_ENCODE_DISABLED;
-        }
-        iwe.u.data.length = 0;
-        current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe, "");
-    }
-    param->bytes_needed += IW_EV_POINT_LEN;
-
-    /* supported bit rate */
     A_MEMZERO(&iwe, sizeof(iwe));
-    iwe.cmd = SIOCGIWRATE;
-    iwe.u.bitrate.fixed = 0;
-    iwe.u.bitrate.disabled = 0;
-    iwe.u.bitrate.value = 0;
-    current_val = current_ev + IW_EV_LCP_LEN;
-    param->bytes_needed += IW_EV_LCP_LEN;
+    iwe.cmd = SIOCGIWFREQ;
+    iwe.u.freq.m = cie->ie_chan * 100000;
+    iwe.u.freq.e = 1;
+    current_ev = iwe_stream_add_event(&info, current_ev, end_buf, &iwe,
+                                      IW_EV_FREQ_LEN);
 
-    if (cie->ie_rates != NULL) {
-        rate_len = cie->ie_rates[1];
-        data_len = (rate_len * (IW_EV_PARAM_LEN - IW_EV_LCP_LEN));
-        if ((end_buf - current_ev) > data_len)
-        {
-            for (j = 0; j < rate_len; j++) {
-                    unsigned char val;
-                    val = cie->ie_rates[2 + j];
-                    iwe.u.bitrate.value =
-                        (val >= 0x80)? ((val - 0x80) * 500000): (val * 500000);
-                    current_val = iwe_stream_add_value(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                                      param->info,
-#endif
-                                      current_ev,
-                                      current_val,
-                                      end_buf,
-                                      &iwe,
-                                      IW_EV_PARAM_LEN);
-            }
-        }
-        param->bytes_needed += data_len;
+    A_MEMZERO(&iwe, sizeof(iwe));
+    iwe.cmd = IWEVQUAL;
+    ar6000_set_quality(&iwe.u.qual, ni->ni_snr);
+    current_ev = iwe_stream_add_event(&info, current_ev, end_buf, &iwe,
+                                      IW_EV_QUAL_LEN);
+
+    A_MEMZERO(&iwe, sizeof(iwe));
+    iwe.cmd = SIOCGIWENCODE;
+    if (cie->ie_capInfo & IEEE80211_CAPINFO_PRIVACY) {
+        iwe.u.data.flags = IW_ENCODE_ENABLED | IW_ENCODE_NOKEY;
+    } else {
+        iwe.u.data.flags = IW_ENCODE_DISABLED;
     }
+    iwe.u.data.length = 0;
+    current_ev = iwe_stream_add_point(&info, current_ev, end_buf, &iwe, "");
 
-    if (cie->ie_xrates != NULL) {
-        rate_len = cie->ie_xrates[1];
-        data_len = (rate_len * (IW_EV_PARAM_LEN - IW_EV_LCP_LEN));
-        if ((end_buf - current_ev) > data_len)
-        {
-            for (j = 0; j < rate_len; j++) {
-                    unsigned char val;
-                    val = cie->ie_xrates[2 + j];
-                    iwe.u.bitrate.value =
-                        (val >= 0x80)? ((val - 0x80) * 500000): (val * 500000);
-                    current_val = iwe_stream_add_value(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                                      param->info,
-#endif
-                                      current_ev,
-                                      current_val,
-                                      end_buf,
-                                      &iwe,
-                                      IW_EV_PARAM_LEN);
-            }
-        }
-        param->bytes_needed += data_len;
-    }
-    /* remove fixed header if no rates were added */
-    if ((current_val - current_ev) > IW_EV_LCP_LEN)
-        current_ev = current_val;
-
-#if WIRELESS_EXT >= 18
-    /* IE */
-    if (cie->ie_wpa != NULL) {
-        data_len = cie->ie_wpa[1] + 2 + IW_EV_POINT_LEN;
-        if ((end_buf - current_ev) > data_len)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = IWEVGENIE;
-            iwe.u.data.length = cie->ie_wpa[1] + 2;
-            current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe, cie->ie_wpa);
-        }
-        param->bytes_needed += data_len;
-    }
-
-    if (cie->ie_rsn != NULL && cie->ie_rsn[0] == IEEE80211_ELEMID_RSN) {
-        data_len = cie->ie_rsn[1] + 2 + IW_EV_POINT_LEN;
-        if ((end_buf - current_ev) > data_len)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = IWEVGENIE;
-            iwe.u.data.length = cie->ie_rsn[1] + 2;
-            current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe, cie->ie_rsn);
-        }
-        param->bytes_needed += data_len;
-    }
-
-#endif /* WIRELESS_EXT >= 18 */
-
-    if ((end_buf - current_ev) > IW_EV_CHAR_LEN)
-    {
-        /* protocol */
-        A_MEMZERO(&iwe, sizeof(iwe));
-        iwe.cmd = SIOCGIWNAME;
-#define CHAN_IS_11A(x)              (!((x >= 2412) && (x <= 2484)))
-        if (CHAN_IS_11A(cie->ie_chan)) {
-            /* 11a */
-            snprintf(iwe.u.name, IFNAMSIZ, "IEEE 802.11a");
-        } else if ((cie->ie_erp) || (cie->ie_xrates)) {
-            /* 11g */
-            snprintf(iwe.u.name, IFNAMSIZ, "IEEE 802.11g");
-        } else {
-            /* 11b */
-            snprintf(iwe.u.name, IFNAMSIZ, "IEEE 802.11b");
-        }
-        current_ev = iwe_stream_add_event(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe, IW_EV_CHAR_LEN);
-    }
-    param->bytes_needed += IW_EV_CHAR_LEN;
-
-#if WIRELESS_EXT > 14
     A_MEMZERO(&iwe, sizeof(iwe));
     iwe.cmd = IWEVCUSTOM;
-    iwe.u.data.length = snprintf(buf, sizeof(buf), "bcn_int=%d", cie->ie_beaconInt);
-    data_len = iwe.u.data.length + IW_EV_POINT_LEN;
-    if ((end_buf - current_ev) > data_len)
-    {
-        current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe, buf);
-    }
-    param->bytes_needed += data_len;
+    snprintf(buf, sizeof(buf), "bcn_int=%d", cie->ie_beaconInt);
+    iwe.u.data.length = strlen(buf);
+    current_ev = iwe_stream_add_point(&info, current_ev, end_buf, &iwe, buf);
 
-#if WIRELESS_EXT < 18
     if (cie->ie_wpa != NULL) {
         static const char wpa_leader[] = "wpa_ie=";
-        data_len = (sizeof(wpa_leader) - 1) + ((cie->ie_wpa[1]+2) * 2) + IW_EV_POINT_LEN;
-        if ((end_buf - current_ev) > data_len)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = IWEVCUSTOM;
-            iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_wpa,
-                                          cie->ie_wpa[1]+2,
-                                          wpa_leader, sizeof(wpa_leader)-1);
 
-            if (iwe.u.data.length != 0) {
-                current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                              param->info,
-#endif
-                              current_ev, end_buf, &iwe, buf);
-            }
+        A_MEMZERO(&iwe, sizeof(iwe));
+        iwe.cmd = IWEVCUSTOM;
+        iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_wpa,
+                                      cie->ie_wpa[1]+2,
+                                      wpa_leader, sizeof(wpa_leader)-1);
+
+        if (iwe.u.data.length != 0) {
+            current_ev = iwe_stream_add_point(&info, current_ev, end_buf, &iwe,
+									   buf);
         }
-        param->bytes_needed += data_len;
     }
 
     if (cie->ie_rsn != NULL && cie->ie_rsn[0] == IEEE80211_ELEMID_RSN) {
         static const char rsn_leader[] = "rsn_ie=";
-        data_len = (sizeof(rsn_leader) - 1) + ((cie->ie_rsn[1]+2) * 2) + IW_EV_POINT_LEN;
-        if ((end_buf - current_ev) > data_len)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = IWEVCUSTOM;
-            iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_rsn,
-                                          cie->ie_rsn[1]+2,
-                                          rsn_leader, sizeof(rsn_leader)-1);
 
-            if (iwe.u.data.length != 0) {
-                current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                              param->info,
-#endif
-                              current_ev, end_buf, &iwe, buf);
-            }
+        A_MEMZERO(&iwe, sizeof(iwe));
+        iwe.cmd = IWEVCUSTOM;
+        iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_rsn,
+                                      cie->ie_rsn[1]+2,
+                                      rsn_leader, sizeof(rsn_leader)-1);
+
+        if (iwe.u.data.length != 0) {
+            current_ev = iwe_stream_add_point(&info, current_ev, end_buf, &iwe,
+									   buf);
         }
-        param->bytes_needed += data_len;
     }
-#endif /* WIRELESS_EXT < 18 */
 
     if (cie->ie_wmm != NULL) {
         static const char wmm_leader[] = "wmm_ie=";
-        data_len = (sizeof(wmm_leader) - 1) + ((cie->ie_wmm[1]+2) * 2) + IW_EV_POINT_LEN;
-        if ((end_buf - current_ev) > data_len)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = IWEVCUSTOM;
-            iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_wmm,
-                                          cie->ie_wmm[1]+2,
-                                          wmm_leader, sizeof(wmm_leader)-1);
-            if (iwe.u.data.length != 0) {
-                current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                              param->info,
-#endif
-                              current_ev, end_buf, &iwe, buf);
-            }
+
+        A_MEMZERO(&iwe, sizeof(iwe));
+        iwe.cmd = IWEVCUSTOM;
+        iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_wmm,
+                                      cie->ie_wmm[1]+2,
+                                      wmm_leader, sizeof(wmm_leader)-1);
+        if (iwe.u.data.length != 0) {
+            current_ev = iwe_stream_add_point(&info, current_ev, end_buf, &iwe,
+									   buf);
         }
-        param->bytes_needed += data_len;
     }
 
     if (cie->ie_ath != NULL) {
         static const char ath_leader[] = "ath_ie=";
-        data_len = (sizeof(ath_leader) - 1) + ((cie->ie_ath[1]+2) * 2) + IW_EV_POINT_LEN;
-        if ((end_buf - current_ev) > data_len)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = IWEVCUSTOM;
-            iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_ath,
-                                          cie->ie_ath[1]+2,
-                                          ath_leader, sizeof(ath_leader)-1);
-            if (iwe.u.data.length != 0) {
-                current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                              param->info,
-#endif
-                              current_ev, end_buf, &iwe, buf);
-            }
-        }
-        param->bytes_needed += data_len;
-    }
 
-#endif /* WIRELESS_EXT > 14 */
-
-#if WIRELESS_EXT >= 18
-    if (cie->ie_wsc != NULL) {
-        data_len = (cie->ie_wsc[1] + 2) + IW_EV_POINT_LEN;
-        if ((end_buf - current_ev) > data_len)
-        {
-            A_MEMZERO(&iwe, sizeof(iwe));
-            iwe.cmd = IWEVGENIE;
-            iwe.u.data.length = cie->ie_wsc[1] + 2;
-            current_ev = iwe_stream_add_point(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-                          param->info,
-#endif
-                          current_ev, end_buf, &iwe, cie->ie_wsc);
+        A_MEMZERO(&iwe, sizeof(iwe));
+        iwe.cmd = IWEVCUSTOM;
+        iwe.u.data.length = encode_ie(buf, sizeof(buf), cie->ie_ath,
+                                      cie->ie_ath[1]+2,
+                                      ath_leader, sizeof(ath_leader)-1);
+        if (iwe.u.data.length != 0) {
+            current_ev = iwe_stream_add_point(&info, current_ev, end_buf, &iwe,
+									   buf);
         }
-        param->bytes_needed += data_len;
     }
-#endif /* WIRELESS_EXT >= 18 */
 
     param->current_ev = current_ev;
 }
@@ -423,11 +210,7 @@ ar6000_ioctl_giwscan(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     struct ar_giwscan_param param;
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
+    int i;
 
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
@@ -438,26 +221,31 @@ ar6000_ioctl_giwscan(struct net_device *dev,
     }
 
     param.current_ev = extra;
-    param.end_buf = extra + data->length;
-    param.bytes_needed = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-    param.info = info;
-#endif
+    param.end_buf = extra + IW_SCAN_MAX_DATA;
+    param.firstPass = TRUE;
 
-    /* Translate data to WE format */
-    wmi_iterate_nodes(ar->arWmi, ar6000_scan_node, &param);
-
-    /* check if bytes needed is greater than bytes consumed */
-    if (param.bytes_needed > (param.current_ev - extra))
-    {
-        /* Request one byte more than needed, because when "data->length" equals bytes_needed,
-        it is not possible to add the last event data as all iwe_stream_add_xxxxx() functions
-        checks whether (cur_ptr + ev_len) < end_ptr, due to this one more retry would happen*/
-        data->length = param.bytes_needed + 1;
-
-        return -E2BIG;
+    /*
+     * Do two passes to insure WPA scan candidates
+     * are sorted to the front.  This is a hack to deal with
+     * the wireless extensions capping scan results at
+     * IW_SCAN_MAX_DATA bytes.  In densely populated environments
+     * it's easy to overflow this buffer (especially with WPA/RSN
+     * information elements).  Note this sorting hack does not
+     * guarantee we won't overflow anyway.
+     */
+    for (i = 0; i < 2; i++) {
+        /*
+         * Translate data to WE format.
+         */
+        wmi_iterate_nodes(ar->arWmi, ar6000_scan_node, &param);
+        param.firstPass = FALSE;
+        if (param.current_ev >= param.end_buf) {
+            data->length = param.current_ev - extra;
+            return -E2BIG;
+        }
     }
 
+    data->length = param.current_ev - extra;
     return 0;
 }
 
@@ -471,16 +259,6 @@ ar6000_ioctl_siwessid(struct net_device *dev,
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     A_STATUS status;
     A_UINT8     arNetworkType;
-    A_UINT8 prevMode = ar->arNetworkType;
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
-    if (ar->bIsDestroyProgress) {
-        return -EBUSY;
-    }
 
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
@@ -490,49 +268,17 @@ ar6000_ioctl_siwessid(struct net_device *dev,
         return -EIO;
     }
 
-#if defined(WIRELESS_EXT)
-    if (WIRELESS_EXT >= 20) {
-        data->length += 1;
-    }
-#endif
-
     /*
-     * iwconfig passes a null terminated string with length including this
-     * so we need to account for this
+     * iwconfig passes a string with length excluding any trailing NUL.
+     * FIXME: we should be able to set an ESSID of 32 bytes, yet things fall
+     * over badly if we do. So we limit the ESSID to 31 bytes.
      */
-    if (data->flags && (!data->length || (data->length == 1) ||
-        ((data->length - 1) > sizeof(ar->arSsid))))
-    {
+    if (data->flags && (!data->length || data->length >= sizeof(ar->arSsid))) {
         /*
          * ssid is invalid
          */
         return -EINVAL;
     }
-
-    if (ar->arNextMode == AP_NETWORK) {
-        /* SSID change for AP network - Will take effect on commit */
-        if(A_MEMCMP(ar->arSsid,ssid,32) != 0) {
-             ar->arSsidLen = data->length - 1;
-            A_MEMCPY(ar->arSsid, ssid, ar->arSsidLen);
-            ar->ap_profile_flag = 1; /* There is a change in profile */
-        }
-        return 0;
-    } else if(ar->arNetworkType == AP_NETWORK) {
-        A_UINT8 ctr;
-        struct sk_buff *skb;
-
-        /* We are switching from AP to STA | IBSS mode, cleanup the AP state */
-        for (ctr=0; ctr < AP_MAX_NUM_STA; ctr++) {
-            remove_sta(ar, ar->sta_list[ctr].mac, 0);
-        }
-        A_MUTEX_LOCK(&ar->mcastpsqLock);
-        while (!A_NETBUF_QUEUE_EMPTY(&ar->mcastpsq)) {
-            skb = A_NETBUF_DEQUEUE(&ar->mcastpsq);
-            A_NETBUF_FREE(skb);
-        }
-        A_MUTEX_UNLOCK(&ar->mcastpsqLock);
-    }
-
     /* Added for bug 25178, return an IOCTL error instead of target returning
        Illegal parameter error when either the BSSID or channel is missing
        and we cannot scan during connect.
@@ -551,17 +297,12 @@ ar6000_ioctl_siwessid(struct net_device *dev,
         return -ERESTARTSYS;
     }
 
-    if (ar->bIsDestroyProgress) {
-        up(&ar->arSem);
-        return -EBUSY;
-    }
-
-    if (ar->arTxPending[wmi_get_control_ep(ar->arWmi)]) {
+    if (ar->arTxPending[WMI_CONTROL_PRI]) {
         /*
          * sleep until the command queue drains
          */
         wait_event_interruptible_timeout(arEvent,
-            ar->arTxPending[wmi_get_control_ep(ar->arWmi)] == 0, wmitimeout * HZ);
+            ar->arTxPending[WMI_CONTROL_PRI] == 0, wmitimeout * HZ);
         if (signal_pending(current)) {
             return -EINTR;
         }
@@ -573,15 +314,23 @@ ar6000_ioctl_siwessid(struct net_device *dev,
         ar->arNetworkType = arNetworkType;
     }
 
-    /* Update the arNetworkType */
-    ar->arNetworkType = ar->arNextMode;
-
-
-    if ((prevMode != AP_NETWORK) && ((ar->arSsidLen) || (!data->flags)))
+    /*
+     * The original logic here prevented a disconnect if issuing an "essid off"
+     * if no ESSID was set, presumably to prevent sending multiple disconnects
+     * to the WMI.
+     *
+     * Unfortunately, this also meant that no disconnect was sent when we were
+     * already connected, but the profile has been changed since (which also
+     * clears the ESSID as a reminder that the WMI needs updating.)
+     *
+     * The "1 ||" makes sure we always disconnect or reconnect. The WMI doesn't
+     * seem to mind being sent multiple disconnects.
+     */
+    if (1 || (ar->arSsidLen) || (!data->flags))
     {
         if ((!data->flags) ||
             (A_MEMCMP(ar->arSsid, ssid, ar->arSsidLen) != 0) ||
-            (ar->arSsidLen != (data->length - 1)))
+            (ar->arSsidLen != (data->length)))
         {
             /*
              * SSID set previously or essid off has been issued.
@@ -593,7 +342,6 @@ ar6000_ioctl_siwessid(struct net_device *dev,
              */
             if (ar->arWmiReady == TRUE) {
                 reconnect_flag = 0;
-                status = wmi_setPmkid_cmd(ar->arWmi, ar->arBssid, NULL, 0);
                 status = wmi_disconnect_cmd(ar->arWmi);
                 A_MEMZERO(ar->arSsid, sizeof(ar->arSsid));
                 ar->arSsidLen = 0;
@@ -639,7 +387,7 @@ ar6000_ioctl_siwessid(struct net_device *dev,
         }
     }
 
-    ar->arSsidLen = data->length - 1;
+    ar->arSsidLen = data->length;
     A_MEMCPY(ar->arSsid, ssid, ar->arSsidLen);
 
     /* The ssid length check prevents second "essid off" from the user,
@@ -647,12 +395,10 @@ ar6000_ioctl_siwessid(struct net_device *dev,
     */
     if((ar->arWmiReady == TRUE) && (ar->arSsidLen > 0) )
     {
-        if((ADHOC_NETWORK != ar->arNetworkType) &&
-           (NONE_AUTH==ar->arAuthMode)          &&
-           (WEP_CRYPT==ar->arPairwiseCrypto)) {
-                ar6000_install_static_wep_keys(ar);
+        AR6000_SPIN_LOCK(&ar->arLock, 0);
+        if (SHARED_AUTH == ar->arDot11AuthMode) {
+            ar6000_install_static_wep_keys(ar);
         }
-
         AR_DEBUG_PRINTF("Connect called with authmode %d dot11 auth %d"\
                         " PW crypto %d PW crypto Len %d GRP crypto %d"\
                         " GRP crypto Len %d\n",
@@ -660,13 +406,14 @@ ar6000_ioctl_siwessid(struct net_device *dev,
                         ar->arPairwiseCrypto, ar->arPairwiseCryptoLen,
                         ar->arGroupCrypto, ar->arGroupCryptoLen);
         reconnect_flag = 0;
+        AR6000_SPIN_UNLOCK(&ar->arLock, 0);
         status = wmi_connect_cmd(ar->arWmi, ar->arNetworkType,
                                  ar->arDot11AuthMode, ar->arAuthMode,
                                  ar->arPairwiseCrypto, ar->arPairwiseCryptoLen,
                                  ar->arGroupCrypto,ar->arGroupCryptoLen,
                                  ar->arSsidLen, ar->arSsid,
                                  ar->arReqBssid, ar->arChannelHint,
-                                 ar->arConnectCtrlFlags | CONNECT_IGNORE_WPAx_GROUP_CIPHER);
+                                 ar->arConnectCtrlFlags);
 
 
         up(&ar->arSem);
@@ -689,17 +436,8 @@ ar6000_ioctl_giwessid(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
-    }
-
-    if (!ar->arSsidLen) {
-        return -EINVAL;
     }
 
     data->flags = 1;
@@ -727,10 +465,112 @@ void ar6000_install_static_wep_keys(AR_SOFTC_T *ar)
                            keyUsage,
                            ar->arWepKeyList[index].arKeyLen,
                            NULL,
-                           ar->arWepKeyList[index].arKey, KEY_OP_INIT_VAL, NULL,
+                           ar->arWepKeyList[index].arKey, KEY_OP_INIT_VAL,
                            NO_SYNC_WMIFLAG);
         }
     }
+}
+
+int
+ar6000_ioctl_delkey(struct net_device *dev, struct iw_request_info *info,
+             void *w, char *extra)
+{
+    return 0;
+}
+
+int
+ar6000_ioctl_setmlme(struct net_device *dev, struct iw_request_info *info,
+             void *w, char *extra)
+{
+    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+    struct ieee80211req_mlme *mlme = (struct ieee80211req_mlme *)extra;
+
+    if ((ar->arWmiReady == FALSE) || (ar->arConnected != TRUE))
+		return -EIO;
+
+    switch (mlme->im_op) {
+        case IEEE80211_MLME_DISASSOC:
+        case IEEE80211_MLME_DEAUTH:
+            /* Not Supported */
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
+
+int
+ar6000_ioctl_setwmmparams(struct net_device *dev, struct iw_request_info *info,
+             void *w, char *extra)
+{
+    return -EIO;            /* for now */
+}
+
+int
+ar6000_ioctl_getwmmparams(struct net_device *dev, struct iw_request_info *info,
+             void *w, char *extra)
+{
+    return -EIO;            /* for now */
+}
+
+int ar6000_ioctl_setoptie(struct net_device *dev, struct iw_request_info *info,
+			  struct iw_point *data, char *extra)
+{
+	/* The target generates the WPA/RSN IE */
+	return 0;
+}
+
+int
+ar6000_ioctl_setauthalg(struct net_device *dev, struct iw_request_info *info,
+             void *w, char *extra)
+{
+    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+    struct ieee80211req_authalg *req = (struct ieee80211req_authalg *)extra;
+    int ret = 0;
+
+
+    AR6000_SPIN_LOCK(&ar->arLock, 0);
+
+    if (req->auth_alg == AUTH_ALG_OPEN_SYSTEM) {
+        ar->arDot11AuthMode  = OPEN_AUTH;
+    } else if (req->auth_alg == AUTH_ALG_LEAP) {
+        ar->arDot11AuthMode   = LEAP_AUTH;
+        ar->arPairwiseCrypto  = WEP_CRYPT;
+        ar->arGroupCrypto     = WEP_CRYPT;
+    } else {
+        ret = -EIO;
+    }
+
+    AR6000_SPIN_UNLOCK(&ar->arLock, 0);
+
+    return ret;
+}
+static int
+ar6000_ioctl_addpmkid(struct net_device *dev, struct iw_request_info *info,
+             void *w, char *extra)
+{
+    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+    struct ieee80211req_addpmkid  *req = (struct ieee80211req_addpmkid *)extra;
+    A_STATUS status;
+
+    if (ar->arWlanState == WLAN_DISABLED) {
+        return -EIO;
+    }
+
+    AR_DEBUG_PRINTF("Add pmkid for %2.2x:%2.2x:%2.2x:%2.2x:%2.2x:%2.2x en=%d\n",
+                    req->pi_bssid[0], req->pi_bssid[1], req->pi_bssid[2],
+                    req->pi_bssid[3], req->pi_bssid[4], req->pi_bssid[5],
+                    req->pi_enable);
+
+    status = wmi_setPmkid_cmd(ar->arWmi, req->pi_bssid, req->pi_pmkid,
+                              req->pi_enable);
+
+    if (status != A_OK) {
+        return -EIO;
+    }
+
+    return 0;
 }
 
 /*
@@ -743,11 +583,6 @@ ar6000_ioctl_siwrate(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     A_UINT32  kbps;
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
 
     if (rrq->fixed) {
         kbps = rrq->value / 1000;           /* rrq->value is in bps */
@@ -762,7 +597,7 @@ ar6000_ioctl_siwrate(struct net_device *dev,
     ar->arBitRate = kbps;
     if(ar->arWmiReady == TRUE)
     {
-        if (wmi_set_bitrate_cmd(ar->arWmi, kbps, -1, -1) != A_OK) {
+        if (wmi_set_bitrate_cmd(ar->arWmi, kbps) != A_OK) {
             return -EINVAL;
         }
     }
@@ -780,24 +615,9 @@ ar6000_ioctl_giwrate(struct net_device *dev,
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     int ret = 0;
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
-    if (ar->bIsDestroyProgress) {
-        return -EBUSY;
-    }
-
     if (down_interruptible(&ar->arSem)) {
         return -ERESTARTSYS;
     }
-
-    if (ar->bIsDestroyProgress) {
-        up(&ar->arSem);
-        return -EBUSY;
-    }
-
     if(ar->arWmiReady == TRUE)
     {
         ar->arBitRate = 0xFFFF;
@@ -837,17 +657,20 @@ ar6000_ioctl_siwtxpow(struct net_device *dev,
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     A_UINT8 dbM;
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
 
-    if (rrq->disabled) {
-        return -EOPNOTSUPP;
+    if (ar->arRadioSwitch == WLAN_ENABLED
+	&& rrq->disabled) {
+	    if (wmi_switch_radio(ar->arWmi, WLAN_DISABLED) < 0)
+		    return -EIO;
+	    ar->arRadioSwitch = WLAN_DISABLED;
+    } else if (ar->arRadioSwitch == WLAN_DISABLED
+	       && !rrq->disabled) {
+	    if (wmi_switch_radio(ar->arWmi, WLAN_ENABLED) < 0)
+		    return -EIO;
+	    ar->arRadioSwitch = WLAN_ENABLED;
     }
 
     if (rrq->fixed) {
@@ -879,28 +702,18 @@ ar6000_ioctl_giwtxpow(struct net_device *dev,
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     int ret = 0;
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
-    if (ar->bIsDestroyProgress) {
-        return -EBUSY;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
+    }
+
+    if (ar->arRadioSwitch == WLAN_DISABLED) {
+	    rrq->disabled = 1;
+	    return 0;
     }
 
     if (down_interruptible(&ar->arSem)) {
         return -ERESTARTSYS;
     }
-
-    if (ar->bIsDestroyProgress) {
-        up(&ar->arSem);
-        return -EBUSY;
-    }
-
     if((ar->arWmiReady == TRUE) && (ar->arConnected == TRUE))
     {
         ar->arTxPwr = 0;
@@ -925,10 +738,6 @@ ar6000_ioctl_giwtxpow(struct net_device *dev,
         }
         rrq->value = ar->arTxPwr;
         rrq->flags = IW_TXPOW_DBM;
-        //
-        // IWLIST need this flag to get TxPower
-        //
-        rrq->disabled = 0;
     }
 
     up(&ar->arSem);
@@ -947,11 +756,6 @@ ar6000_ioctl_siwretry(struct net_device *dev,
              struct iw_param *rrq, char *extra)
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
 
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
@@ -989,11 +793,6 @@ ar6000_ioctl_giwretry(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
@@ -1030,21 +829,7 @@ ar6000_ioctl_siwencode(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     int index;
-    A_INT32 auth = 0;
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
-    if(ar->arNextMode != AP_NETWORK) {
-    /*
-     *  Static WEP Keys should be configured before setting the SSID
-     */
-    if (ar->arSsid[0] && erq->length) {
-        return -EIO;
-    }
-    }
+    A_INT32 auth = ar->arDot11AuthMode;
 
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
@@ -1084,15 +869,9 @@ ar6000_ioctl_siwencode(struct net_device *dev,
         }
 
         if (erq->flags & IW_ENCODE_OPEN) {
-            auth |= OPEN_AUTH;
-            ar->arDefTxKeyIndex = index;
-        }
-        if (erq->flags & IW_ENCODE_RESTRICTED) {
-            auth |= SHARED_AUTH;
-        }
-
-        if(!auth) {
-            auth = ar->arDot11AuthMode;
+            auth = OPEN_AUTH;
+        } else if (erq->flags & IW_ENCODE_RESTRICTED) {
+            auth = SHARED_AUTH;
         }
 
         if (erq->length) {
@@ -1109,17 +888,6 @@ ar6000_ioctl_siwencode(struct net_device *dev,
                 return -EIO;
             }
             ar->arDefTxKeyIndex = index;
-
-            if(ar->arSsidLen && ar->arWepKeyList[index].arKeyLen) {
-                wmi_addKey_cmd(ar->arWmi,
-                               index,
-                               WEP_CRYPT,
-                               GROUP_USAGE | TX_USAGE,
-                               ar->arWepKeyList[index].arKeyLen,
-                               NULL,
-                               ar->arWepKeyList[index].arKey, KEY_OP_INIT_VAL, NULL,
-                               NO_SYNC_WMIFLAG);
-            }
         }
 
         ar->arPairwiseCrypto      = WEP_CRYPT;
@@ -1128,13 +896,12 @@ ar6000_ioctl_siwencode(struct net_device *dev,
         ar->arAuthMode            = NONE_AUTH;
     }
 
-    if(ar->arNextMode != AP_NETWORK) {
     /*
      * profile has changed.  Erase ssid to signal change
      */
     A_MEMZERO(ar->arSsid, sizeof(ar->arSsid));
-    }
-    ar->ap_profile_flag = 1; /* There is a change in profile */
+    ar->arSsidLen = 0;
+
     return 0;
 }
 
@@ -1146,11 +913,6 @@ ar6000_ioctl_giwencode(struct net_device *dev,
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     A_UINT8 keyIndex;
     struct ar_wep_key *wk;
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
 
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
@@ -1180,10 +942,9 @@ ar6000_ioctl_giwencode(struct net_device *dev,
         if (wk->arKeyLen) {
             A_MEMCPY(key, wk->arKey, erq->length);
         }
-        if (ar->arDot11AuthMode & OPEN_AUTH) {
+        if (ar->arDot11AuthMode == OPEN_AUTH) {
             erq->flags |= IW_ENCODE_OPEN;
-        }
-        if (ar->arDot11AuthMode & SHARED_AUTH) {
+        } else if (ar->arDot11AuthMode == SHARED_AUTH) {
             erq->flags |= IW_ENCODE_RESTRICTED;
         }
     }
@@ -1192,285 +953,482 @@ ar6000_ioctl_giwencode(struct net_device *dev,
 }
 
 static int ar6000_ioctl_siwpower(struct net_device *dev,
-                 struct iw_request_info *info,
-                 union iwreq_data *wrqu, char *extra)
+				 struct iw_request_info *info,
+				 union iwreq_data *wrqu, char *extra)
 {
-#if defined(WIRELESS_EXT) && WIRELESS_EXT > 20
-    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
-    WMI_POWER_MODE power_mode;
+	AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+	WMI_POWER_MODE power_mode;
 
-    if (ar->arWlanState == WLAN_DISABLED) {
-        return -EIO;
-    }
+	if (wrqu->power.disabled)
+		power_mode = MAX_PERF_POWER;
+	else
+		power_mode = REC_POWER;
 
-    if (wrqu->power.disabled)
-        power_mode = MAX_PERF_POWER;
-    else
-        power_mode = REC_POWER;
+	if (wmi_powermode_cmd(ar->arWmi, power_mode) < 0)
+		return -EIO;
 
-    if (wmi_powermode_cmd(ar->arWmi, power_mode) < 0)
-        return -EIO;
-#endif
-    return 0;
+	return 0;
 }
 
 static int ar6000_ioctl_giwpower(struct net_device *dev,
-                 struct iw_request_info *info,
-                 union iwreq_data *wrqu, char *extra)
+				 struct iw_request_info *info,
+				 union iwreq_data *wrqu, char *extra)
 {
-#if defined(WIRELESS_EXT) && WIRELESS_EXT > 20
-    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+	AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (ar->arWlanState == WLAN_DISABLED) {
-        return -EIO;
-    }
-    if(!ar->arWmi){
-        return -EIO;
-    }
-    return wmi_get_power_mode_cmd(ar->arWmi);
-#else
-        return 0;
-#endif
+	/*
+	 * FIXME:
+	 * https://docs.openmoko.org/trac/ticket/2267
+	 * When starting wpa_supplicant the kernel oopses.
+	 * The following condition avoids the oops.
+	 * Remove this comment to bless this solution.
+	 */
+	if (ar->arWlanState == WLAN_DISABLED || ar->arWmiReady == FALSE)
+		return -EIO;
+
+	return wmi_get_power_mode_cmd(ar->arWmi);
 }
 
 static int ar6000_ioctl_siwgenie(struct net_device *dev,
-                 struct iw_request_info *info,
-                 struct iw_point *dwrq,
-                 char *extra)
+				 struct iw_request_info *info,
+				 struct iw_point *dwrq,
+				 char *extra)
 {
-    /* The target does that for us */
-    return 0;
+	/* The target does that for us */
+	return 0;
 }
 
 static int ar6000_ioctl_giwgenie(struct net_device *dev,
-                 struct iw_request_info *info,
-                 struct iw_point *dwrq,
-                 char *extra)
+				 struct iw_request_info *info,
+				 struct iw_point *dwrq,
+				 char *extra)
 {
-    return 0;
+	return 0;
 }
 
 static int ar6000_ioctl_siwauth(struct net_device *dev,
-                struct iw_request_info *info,
-                struct iw_param *param,
-                char *extra)
+				struct iw_request_info *info,
+				struct iw_param *param,
+				char *extra)
 {
-#if defined(WIRELESS_EXT) && WIRELESS_EXT > 20
-    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
-    int reset = 0;
+	AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+	int reset = 0;
 
-    switch (param->flags & IW_AUTH_INDEX) {
-    case IW_AUTH_WPA_VERSION:
-        if (param->value & IW_AUTH_WPA_VERSION_DISABLED) {
-            ar->arAuthMode = NONE_AUTH;
-        }
-        if (param->value & IW_AUTH_WPA_VERSION_WPA) {
-            ar->arAuthMode = WPA_AUTH;
-        }
-        if (param->value & IW_AUTH_WPA_VERSION_WPA2) {
-            ar->arAuthMode = WPA2_AUTH;
-        }
+	switch (param->flags & IW_AUTH_INDEX) {
+	case IW_AUTH_WPA_VERSION:
+		if (param->value & IW_AUTH_WPA_VERSION_DISABLED) {
+			ar->arAuthMode = NONE_AUTH;
+		}
+		if (param->value & IW_AUTH_WPA_VERSION_WPA) {
+			ar->arAuthMode = WPA_AUTH;
+		}
+		if (param->value & IW_AUTH_WPA_VERSION_WPA2) {
+			ar->arAuthMode = WPA2_AUTH;
+		}
 
-        reset = 1;
-        break;
-    case IW_AUTH_CIPHER_PAIRWISE:
-        if (param->value & IW_AUTH_CIPHER_NONE) {
-            ar->arPairwiseCrypto = NONE_CRYPT;
-        }
-        if (param->value & IW_AUTH_CIPHER_WEP40) {
-            ar->arPairwiseCrypto = WEP_CRYPT;
-        }
-        if (param->value & IW_AUTH_CIPHER_TKIP) {
-            ar->arPairwiseCrypto = TKIP_CRYPT;
-        }
-        if (param->value & IW_AUTH_CIPHER_CCMP) {
-            ar->arPairwiseCrypto = AES_CRYPT;
-        }
+		reset = 1;
+		break;
+	case IW_AUTH_CIPHER_PAIRWISE:
+		if (param->value & IW_AUTH_CIPHER_NONE) {
+			ar->arPairwiseCrypto = NONE_CRYPT;
+		}
+		if (param->value & IW_AUTH_CIPHER_WEP40) {
+			ar->arPairwiseCrypto = WEP_CRYPT;
+		}
+		if (param->value & IW_AUTH_CIPHER_TKIP) {
+			ar->arPairwiseCrypto = TKIP_CRYPT;
+		}
+		if (param->value & IW_AUTH_CIPHER_CCMP) {
+			ar->arPairwiseCrypto = AES_CRYPT;
+		}
 
-        reset = 1;
-        break;
-    case IW_AUTH_CIPHER_GROUP:
-        if (param->value & IW_AUTH_CIPHER_NONE) {
-            ar->arGroupCrypto = NONE_CRYPT;
-        }
-        if (param->value & IW_AUTH_CIPHER_WEP40) {
-            ar->arGroupCrypto = WEP_CRYPT;
-        }
-        if (param->value & IW_AUTH_CIPHER_TKIP) {
-            ar->arGroupCrypto = TKIP_CRYPT;
-        }
-        if (param->value & IW_AUTH_CIPHER_CCMP) {
-            ar->arGroupCrypto = AES_CRYPT;
-        }
+		reset = 1;
+		break;
+	case IW_AUTH_CIPHER_GROUP:
+		if (param->value & IW_AUTH_CIPHER_NONE) {
+			ar->arGroupCrypto = NONE_CRYPT;
+		}
+		if (param->value & IW_AUTH_CIPHER_WEP40) {
+			ar->arGroupCrypto = WEP_CRYPT;
+		}
+		if (param->value & IW_AUTH_CIPHER_TKIP) {
+			ar->arGroupCrypto = TKIP_CRYPT;
+		}
+		if (param->value & IW_AUTH_CIPHER_CCMP) {
+			ar->arGroupCrypto = AES_CRYPT;
+		}
 
-        reset = 1;
-        break;
-    case IW_AUTH_KEY_MGMT:
-        if (param->value & IW_AUTH_KEY_MGMT_PSK) {
-            if (ar->arAuthMode == WPA_AUTH) {
-                ar->arAuthMode = WPA_PSK_AUTH;
-            } else if (ar->arAuthMode == WPA2_AUTH) {
-                ar->arAuthMode = WPA2_PSK_AUTH;
-            }
+		reset = 1;
+		break;
+	case IW_AUTH_KEY_MGMT:
+		if (param->value & IW_AUTH_KEY_MGMT_PSK) {
+			if (ar->arAuthMode == WPA_AUTH) {
+				ar->arAuthMode = WPA_PSK_AUTH;
+			} else if (ar->arAuthMode == WPA2_AUTH) {
+				ar->arAuthMode = WPA2_PSK_AUTH;
+			}
 
-            reset = 1;
-        }
-        break;
+			reset = 1;
+		}
+		break;
 
-    case IW_AUTH_TKIP_COUNTERMEASURES:
-        if (ar->arWmiReady == FALSE) {
-            return -EIO;
-        }
-        wmi_set_tkip_countermeasures_cmd(ar->arWmi, param->value);
-        break;
+	case IW_AUTH_TKIP_COUNTERMEASURES:
+		if (ar->arWmiReady == FALSE) {
+			return -EIO;
+		}
+		wmi_set_tkip_countermeasures_cmd(ar->arWmi, param->value);
+		break;
 
-    case IW_AUTH_DROP_UNENCRYPTED:
-        break;
+	case IW_AUTH_DROP_UNENCRYPTED:
+		break;
 
-    case IW_AUTH_80211_AUTH_ALG:
-        ar->arDot11AuthMode = 0;
-        if (param->value & IW_AUTH_ALG_OPEN_SYSTEM) {
-            ar->arDot11AuthMode  |= OPEN_AUTH;
-        }
-        if (param->value & IW_AUTH_ALG_SHARED_KEY) {
-            ar->arDot11AuthMode  |= SHARED_AUTH;
-        }
-        if (param->value & IW_AUTH_ALG_LEAP) {
-            ar->arDot11AuthMode   = LEAP_AUTH;
-            ar->arPairwiseCrypto  = WEP_CRYPT;
-            ar->arGroupCrypto     = WEP_CRYPT;
-        }
-        reset = 1;
-        break;
+	case IW_AUTH_80211_AUTH_ALG:
+		if (param->value & IW_AUTH_ALG_OPEN_SYSTEM) {
+			ar->arDot11AuthMode  = OPEN_AUTH;
+		}
+		if (param->value & IW_AUTH_ALG_SHARED_KEY) {
+			ar->arDot11AuthMode  = SHARED_AUTH;
+		}
+		if (param->value & IW_AUTH_ALG_LEAP) {
+			ar->arDot11AuthMode   = LEAP_AUTH;
+			ar->arPairwiseCrypto  = WEP_CRYPT;
+			ar->arGroupCrypto     = WEP_CRYPT;
+		}
 
-    case IW_AUTH_WPA_ENABLED:
-        reset = 1;
-        break;
+		reset = 1;
+		break;
 
-    case IW_AUTH_RX_UNENCRYPTED_EAPOL:
-        break;
+	case IW_AUTH_WPA_ENABLED:
+		reset = 1;
+		break;
 
-    case IW_AUTH_PRIVACY_INVOKED:
-        break;
+	case IW_AUTH_RX_UNENCRYPTED_EAPOL:
+		break;
 
-    default:
-        printk("%s(): Unknown flag 0x%x\n", __FUNCTION__, param->flags);
-        return -EOPNOTSUPP;
-    }
+	case IW_AUTH_PRIVACY_INVOKED:
+		break;
 
-    if (reset)
-        memset(ar->arSsid, 0, sizeof(ar->arSsid));
-#endif
-    return 0;
+	default:
+		printk("%s(): Unknown flag 0x%x\n", __FUNCTION__, param->flags);
+		return -EOPNOTSUPP;
+	}
+
+	if (reset) {
+		A_MEMZERO(ar->arSsid, sizeof(ar->arSsid));
+		ar->arSsidLen = 0;
+	}
+
+	return 0;
 }
 
 static int ar6000_ioctl_giwauth(struct net_device *dev,
-                struct iw_request_info *info,
-                struct iw_param *dwrq,
-                char *extra)
+				struct iw_request_info *info,
+				struct iw_param *dwrq,
+				char *extra)
 {
-    return 0;
+	return 0;
 }
 
 static int ar6000_ioctl_siwencodeext(struct net_device *dev,
-                     struct iw_request_info *info,
-                     union iwreq_data *wrqu,
-                     char *extra)
+				     struct iw_request_info *info,
+				     union iwreq_data *wrqu,
+				     char *extra)
 {
-#if defined(WIRELESS_EXT) && WIRELESS_EXT > 20
-    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
-    struct iw_point *encoding = &wrqu->encoding;
-    struct iw_encode_ext *ext = (struct iw_encode_ext *)extra;
-    int alg = ext->alg, idx;
+	AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+	struct iw_point *encoding = &wrqu->encoding;
+	struct iw_encode_ext *ext = (struct iw_encode_ext *)extra;
+	int alg = ext->alg, idx;
 
-    if (ar->arWlanState == WLAN_DISABLED) {
-        return -EIO;
-    }
+	if (ar->arWlanState == WLAN_DISABLED) {
+		return -EIO;
+	}
 
-    /* Determine and validate the key index */
-    idx = (encoding->flags & IW_ENCODE_INDEX) - 1;
-    if (idx) {
-        if (idx < 0 || idx > 3)
-            return -EINVAL;
-    }
+	/* Determine and validate the key index */
+	idx = (encoding->flags & IW_ENCODE_INDEX) - 1;
+	if (idx) {
+		if (idx < 0 || idx > 3)
+			return -EINVAL;
+	}
 
-    if ((alg == IW_ENCODE_ALG_TKIP) || (alg == IW_ENCODE_ALG_CCMP)) {
-        struct ieee80211req_key ik;
-        KEY_USAGE key_usage;
-        CRYPTO_TYPE key_type = NONE_CRYPT;
-        int status;
+	if ((alg == IW_ENCODE_ALG_TKIP) || (alg == IW_ENCODE_ALG_CCMP)) {
+		struct ieee80211req_key ik;
+		KEY_USAGE key_usage;
+		CRYPTO_TYPE key_type = NONE_CRYPT;
+		int status;
 
-        ar->user_saved_keys.keyOk = FALSE;
+		ar->user_saved_keys.keyOk = FALSE;
 
-        if (alg == IW_ENCODE_ALG_TKIP) {
-            key_type = TKIP_CRYPT;
-            ik.ik_type = IEEE80211_CIPHER_TKIP;
-        } else {
-            key_type = AES_CRYPT;
-            ik.ik_type = IEEE80211_CIPHER_AES_CCM;
-        }
+		if (alg == IW_ENCODE_ALG_TKIP) {
+			key_type = TKIP_CRYPT;
+			ik.ik_type = IEEE80211_CIPHER_TKIP;
+		} else {
+			key_type = AES_CRYPT;
+			ik.ik_type = IEEE80211_CIPHER_AES_CCM;
+		}
 
-        ik.ik_keyix = idx;
-        ik.ik_keylen = ext->key_len;
-        ik.ik_flags = IEEE80211_KEY_RECV;
-        if (ext->ext_flags & IW_ENCODE_EXT_SET_TX_KEY) {
-            ik.ik_flags |= IEEE80211_KEY_XMIT
-                | IEEE80211_KEY_DEFAULT;
-        }
+		ik.ik_keyix = idx;
+		ik.ik_keylen = ext->key_len;
+		ik.ik_flags = IEEE80211_KEY_RECV;
+		if (ext->ext_flags & IW_ENCODE_EXT_SET_TX_KEY) {
+			ik.ik_flags |= IEEE80211_KEY_XMIT
+				| IEEE80211_KEY_DEFAULT;
+		}
 
-        if (ext->ext_flags & IW_ENCODE_EXT_RX_SEQ_VALID) {
-            memcpy(&ik.ik_keyrsc, ext->rx_seq, 8);
-        }
+		if (ext->ext_flags & IW_ENCODE_EXT_RX_SEQ_VALID) {
+			memcpy(&ik.ik_keyrsc, ext->rx_seq, 8);
+		}
 
-        memcpy(ik.ik_keydata, ext->key, ext->key_len);
+		memcpy(ik.ik_keydata, ext->key, ext->key_len);
 
-        ar->user_saved_keys.keyType = key_type;
-        if (ext->ext_flags & IW_ENCODE_EXT_GROUP_KEY) {
-            key_usage = GROUP_USAGE;
-            memset(ik.ik_macaddr, 0, ETH_ALEN);
-            memcpy(&ar->user_saved_keys.bcast_ik, &ik,
-                   sizeof(struct ieee80211req_key));
-        } else {
-            key_usage = PAIRWISE_USAGE;
-            memcpy(ik.ik_macaddr, ext->addr.sa_data, ETH_ALEN);
-            memcpy(&ar->user_saved_keys.ucast_ik, &ik,
-                   sizeof(struct ieee80211req_key));
-        }
+		ar->user_saved_keys.keyType = key_type;
+		if (ext->ext_flags & IW_ENCODE_EXT_GROUP_KEY) {
+			key_usage = GROUP_USAGE;
+			memset(ik.ik_macaddr, 0, ETH_ALEN);
+			memcpy(&ar->user_saved_keys.bcast_ik, &ik,
+			       sizeof(struct ieee80211req_key));
+		} else {
+			key_usage = PAIRWISE_USAGE;
+			memcpy(ik.ik_macaddr, ext->addr.sa_data, ETH_ALEN);
+			memcpy(&ar->user_saved_keys.ucast_ik, &ik,
+			       sizeof(struct ieee80211req_key));
+		}
 
-        if (((WPA_PSK_AUTH == ar->arAuthMode) || (WPA2_PSK_AUTH == ar->arAuthMode)) &&
-            (GROUP_USAGE == key_usage))
-        {
-            A_UNTIMEOUT(&ar->disconnect_timer);
-        }
+		status = wmi_addKey_cmd(ar->arWmi, ik.ik_keyix, key_type,
+					key_usage, ik.ik_keylen,
+					(A_UINT8 *)&ik.ik_keyrsc,
+					ik.ik_keydata,
+					KEY_OP_INIT_VAL, SYNC_BEFORE_WMIFLAG);
 
-        status = wmi_addKey_cmd(ar->arWmi, ik.ik_keyix, key_type,
-                    key_usage, ik.ik_keylen,
-                    (A_UINT8 *)&ik.ik_keyrsc,
-                    ik.ik_keydata,
-                    KEY_OP_INIT_VAL, ik.ik_macaddr,
-                    SYNC_BEFORE_WMIFLAG);
+		if (status < 0)
+			return -EIO;
 
-        if (status < 0)
-            return -EIO;
+		ar->user_saved_keys.keyOk = TRUE;
 
-        ar->user_saved_keys.keyOk = TRUE;
+		return 0;
 
-        return 0;
+	} else {
+		/* WEP falls back to SIWENCODE */
+		return -EOPNOTSUPP;
+	}
 
-    } else {
-        /* WEP falls back to SIWENCODE */
-        return -EOPNOTSUPP;
-    }
-#endif
-    return 0;
+	return 0;
 }
 
 
 static int ar6000_ioctl_giwencodeext(struct net_device *dev,
-                     struct iw_request_info *info,
-                     struct iw_point *dwrq,
-                     char *extra)
+				     struct iw_request_info *info,
+				     struct iw_point *dwrq,
+				     char *extra)
 {
+	return 0;
+}
+
+
+static int
+ar6000_ioctl_setparam(struct net_device *dev,
+                      struct iw_request_info *info,
+                      void *erq, char *extra)
+{
+    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+    int *i = (int *)extra;
+    int param = i[0];
+    int value = i[1];
+    int ret = 0;
+    A_BOOL profChanged = FALSE;
+
+    if (ar->arWlanState == WLAN_DISABLED) {
+        return -EIO;
+    }
+
+    switch (param) {
+        case IEEE80211_PARAM_WPA:
+            switch (value) {
+                case WPA_MODE_WPA1:
+                    ar->arAuthMode = WPA_AUTH;
+                    profChanged    = TRUE;
+                    break;
+                case WPA_MODE_WPA2:
+                    ar->arAuthMode = WPA2_AUTH;
+                    profChanged    = TRUE;
+                    break;
+                case WPA_MODE_NONE:
+                    ar->arAuthMode = NONE_AUTH;
+                    profChanged    = TRUE;
+                    break;
+	    default:
+		    printk("IEEE80211_PARAM_WPA: Unknown value %d\n", value);
+            }
+            break;
+        case IEEE80211_PARAM_AUTHMODE:
+            switch(value) {
+                case IEEE80211_AUTH_WPA_PSK:
+                    if (WPA_AUTH == ar->arAuthMode) {
+                        ar->arAuthMode = WPA_PSK_AUTH;
+                        profChanged    = TRUE;
+                    } else if (WPA2_AUTH == ar->arAuthMode) {
+                        ar->arAuthMode = WPA2_PSK_AUTH;
+                        profChanged    = TRUE;
+                    } else {
+                        AR_DEBUG_PRINTF("Error -  Setting PSK mode when WPA "\
+                                        "param was set to %d\n",
+                                        ar->arAuthMode);
+                        ret = -1;
+                    }
+                    break;
+                case IEEE80211_AUTH_WPA_CCKM:
+                    if (WPA2_AUTH == ar->arAuthMode) {
+                        ar->arAuthMode = WPA2_AUTH_CCKM;
+                    } else {
+                        ar->arAuthMode = WPA_AUTH_CCKM;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case IEEE80211_PARAM_UCASTCIPHER:
+            switch (value) {
+                case IEEE80211_CIPHER_AES_CCM:
+                    ar->arPairwiseCrypto = AES_CRYPT;
+                    profChanged          = TRUE;
+                    break;
+                case IEEE80211_CIPHER_TKIP:
+                    ar->arPairwiseCrypto = TKIP_CRYPT;
+                    profChanged          = TRUE;
+                    break;
+                case IEEE80211_CIPHER_WEP:
+                    ar->arPairwiseCrypto = WEP_CRYPT;
+                    profChanged          = TRUE;
+                    break;
+                case IEEE80211_CIPHER_NONE:
+                    ar->arPairwiseCrypto = NONE_CRYPT;
+                    profChanged          = TRUE;
+                    break;
+            }
+            break;
+        case IEEE80211_PARAM_UCASTKEYLEN:
+            if (!IEEE80211_IS_VALID_WEP_CIPHER_LEN(value)) {
+                ret = -EIO;
+            } else {
+                ar->arPairwiseCryptoLen = value;
+            }
+            break;
+        case IEEE80211_PARAM_MCASTCIPHER:
+            switch (value) {
+                case IEEE80211_CIPHER_AES_CCM:
+                    ar->arGroupCrypto = AES_CRYPT;
+                    profChanged       = TRUE;
+                    break;
+                case IEEE80211_CIPHER_TKIP:
+                    ar->arGroupCrypto = TKIP_CRYPT;
+                    profChanged       = TRUE;
+                    break;
+                case IEEE80211_CIPHER_WEP:
+                    ar->arGroupCrypto = WEP_CRYPT;
+                    profChanged       = TRUE;
+                    break;
+                case IEEE80211_CIPHER_NONE:
+                    ar->arGroupCrypto = NONE_CRYPT;
+                    profChanged       = TRUE;
+                    break;
+            }
+            break;
+        case IEEE80211_PARAM_MCASTKEYLEN:
+            if (!IEEE80211_IS_VALID_WEP_CIPHER_LEN(value)) {
+                ret = -EIO;
+            } else {
+                ar->arGroupCryptoLen = value;
+            }
+            break;
+        case IEEE80211_PARAM_COUNTERMEASURES:
+            if (ar->arWmiReady == FALSE) {
+                return -EIO;
+            }
+            wmi_set_tkip_countermeasures_cmd(ar->arWmi, value);
+            break;
+        default:
+            break;
+    }
+
+    if (profChanged == TRUE) {
+        /*
+         * profile has changed.  Erase ssid to signal change
+         */
+	A_MEMZERO(ar->arSsid, sizeof(ar->arSsid));
+	ar->arSsidLen = 0;
+    }
+
+    return ret;
+}
+
+int
+ar6000_ioctl_getparam(struct net_device *dev, struct iw_request_info *info,
+            void *w, char *extra)
+{
+    return -EIO;            /* for now */
+}
+
+int
+ar6000_ioctl_setkey(struct net_device *dev, struct iw_request_info *info,
+		    void *w, char *extra)
+{
+    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
+    struct ieee80211req_key *ik = (struct ieee80211req_key *)extra;
+    KEY_USAGE keyUsage;
+    A_STATUS status;
+    CRYPTO_TYPE keyType = NONE_CRYPT;
+
+    if (ar->arWlanState == WLAN_DISABLED) {
+        return -EIO;
+    }
+
+    ar->user_saved_keys.keyOk = FALSE;
+
+    if ( 0 == memcmp(ik->ik_macaddr, "\x00\x00\x00\x00\x00\x00",
+                     IEEE80211_ADDR_LEN)) {
+        keyUsage = GROUP_USAGE;
+        A_MEMCPY(&ar->user_saved_keys.bcast_ik, ik,
+                 sizeof(struct ieee80211req_key));
+    } else {
+        keyUsage = PAIRWISE_USAGE;
+        A_MEMCPY(&ar->user_saved_keys.ucast_ik, ik,
+                 sizeof(struct ieee80211req_key));
+    }
+
+    switch (ik->ik_type) {
+        case IEEE80211_CIPHER_WEP:
+            keyType = WEP_CRYPT;
+            break;
+        case IEEE80211_CIPHER_TKIP:
+            keyType = TKIP_CRYPT;
+            break;
+        case IEEE80211_CIPHER_AES_CCM:
+            keyType = AES_CRYPT;
+            break;
+        default:
+            break;
+    }
+    ar->user_saved_keys.keyType = keyType;
+
+    if (IEEE80211_CIPHER_CCKM_KRK != ik->ik_type) {
+        if (NONE_CRYPT == keyType) {
+            return -EIO;
+        }
+
+        status = wmi_addKey_cmd(ar->arWmi, ik->ik_keyix, keyType, keyUsage,
+                                ik->ik_keylen, (A_UINT8 *)&ik->ik_keyrsc,
+                                ik->ik_keydata, KEY_OP_INIT_VAL,
+                                SYNC_BEFORE_WMIFLAG);
+
+        if (status != A_OK) {
+            return -EIO;
+        }
+    } else {
+        status = wmi_add_krk_cmd(ar->arWmi, ik->ik_keydata);
+    }
+
+    ar->user_saved_keys.keyOk = TRUE;
+
     return 0;
 }
 
@@ -1484,11 +1442,6 @@ ar6000_ioctl_giwname(struct net_device *dev,
            char *name, char *extra)
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
 
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
@@ -1522,11 +1475,6 @@ ar6000_ioctl_siwfreq(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
@@ -1546,8 +1494,6 @@ ar6000_ioctl_siwfreq(struct net_device *dev,
         ar->arChannelHint = wlan_ieee2freq(freq->m);
     }
 
-    ar->ap_profile_flag = 1; /* There is a change in profile */
-
     A_PRINTF("channel hint set to %d\n", ar->arChannelHint);
     return 0;
 }
@@ -1562,11 +1508,6 @@ ar6000_ioctl_giwfreq(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
@@ -1574,12 +1515,8 @@ ar6000_ioctl_giwfreq(struct net_device *dev,
     if (ar->arConnected != TRUE) {
         return -EINVAL;
     }
-    if (ar->arNetworkType == AP_NETWORK) {
-        freq->m = ar->arChannelHint * 100000;
-    } else {
-        freq->m = ar->arBssChannel * 100000;
-    }
 
+    freq->m = ar->arBssChannel * 100000;
     freq->e = 1;
 
     return 0;
@@ -1595,53 +1532,19 @@ ar6000_ioctl_siwmode(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
 
     switch (*mode) {
     case IW_MODE_INFRA:
-        ar->arNextMode = INFRA_NETWORK;
+        ar->arNetworkType = INFRA_NETWORK;
         break;
     case IW_MODE_ADHOC:
-        ar->arNextMode = ADHOC_NETWORK;
-        break;
-    case IW_MODE_MASTER:
-        ar->arNextMode = AP_NETWORK;
+        ar->arNetworkType = ADHOC_NETWORK;
         break;
     default:
         return -EINVAL;
-    }
-
-    /* clear all shared parameters between AP and STA|IBSS modes when we
-     * switch between them. Switch between STA & IBSS modes does'nt clear
-     * the shared profile. This is as per the original design for switching
-     * between STA & IBSS.
-     */
-    if (ar->arNetworkType == AP_NETWORK || ar->arNextMode == AP_NETWORK) {
-        ar->arDot11AuthMode      = OPEN_AUTH;
-        ar->arAuthMode           = NONE_AUTH;
-        ar->arPairwiseCrypto     = NONE_CRYPT;
-        ar->arPairwiseCryptoLen  = 0;
-        ar->arGroupCrypto        = NONE_CRYPT;
-        ar->arGroupCryptoLen     = 0;
-        ar->arChannelHint        = 0;
-        ar->arBssChannel         = 0;
-        A_MEMZERO(ar->arBssid, sizeof(ar->arBssid));
-        A_MEMZERO(ar->arSsid, sizeof(ar->arSsid));
-        ar->arSsidLen = 0;
-    }
-
-    /* SSID has to be cleared to trigger a profile change while switching
-     * between STA & IBSS modes having the same SSID
-     */
-    if (ar->arNetworkType != ar->arNextMode) {
-        A_MEMZERO(ar->arSsid, sizeof(ar->arSsid));
     }
 
     return 0;
@@ -1657,11 +1560,6 @@ ar6000_ioctl_giwmode(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
@@ -1672,9 +1570,6 @@ ar6000_ioctl_giwmode(struct net_device *dev,
         break;
     case ADHOC_NETWORK:
         *mode = IW_MODE_ADHOC;
-        break;
-    case AP_NETWORK:
-        *mode = IW_MODE_MASTER;
         break;
     default:
         return -EIO;
@@ -1719,15 +1614,6 @@ ar6000_ioctl_giwrange(struct net_device *dev,
     struct iw_range *range = (struct iw_range *) extra;
     int i, ret = 0;
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
-    if (ar->bIsDestroyProgress) {
-        return -EBUSY;
-    }
-
     if (ar->arWmiReady == FALSE) {
         return -EIO;
     }
@@ -1739,12 +1625,6 @@ ar6000_ioctl_giwrange(struct net_device *dev,
     if (down_interruptible(&ar->arSem)) {
         return -ERESTARTSYS;
     }
-
-    if (ar->bIsDestroyProgress) {
-        up(&ar->arSem);
-        return -EBUSY;
-    }
-
     ar->arNumChannels = -1;
     A_MEMZERO(ar->arChannelList, sizeof (ar->arChannelList));
 
@@ -1763,7 +1643,7 @@ ar6000_ioctl_giwrange(struct net_device *dev,
     data->length = sizeof(struct iw_range);
     A_MEMZERO(range, sizeof(struct iw_range));
 
-    range->txpower_capa = 0;
+    range->txpower_capa = IW_TXPOW_DBM;
 
     range->min_pmp = 1 * 1024;
     range->max_pmp = 65535 * 1024;
@@ -1844,11 +1724,6 @@ ar6000_ioctl_siwap(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
@@ -1876,11 +1751,6 @@ ar6000_ioctl_giwap(struct net_device *dev,
 {
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWlanState == WLAN_DISABLED) {
         return -EIO;
     }
@@ -1889,105 +1759,11 @@ ar6000_ioctl_giwap(struct net_device *dev,
         return -EINVAL;
     }
 
-    if (ar->arNetworkType == AP_NETWORK) {
-        return -EINVAL;
-    }
-
     A_MEMCPY(&ap_addr->sa_data, ar->arBssid, sizeof(ar->arBssid));
     ap_addr->sa_family = ARPHRD_ETHER;
 
     return 0;
 }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
-/*
- * SIOCSIWMLME
- */
-int
-ar6000_ioctl_siwmlme(struct net_device *dev,
-            struct iw_request_info *info,
-            struct iw_point *data, char *extra)
-{
-    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
-    if (ar->bIsDestroyProgress) {
-        return -EBUSY;
-    }
-
-    if (ar->arWlanState == WLAN_DISABLED) {
-        return -EIO;
-    }
-
-    if (ar->arWmiReady == FALSE) {
-        return -EIO;
-    }
-
-    if (ar->arNetworkType == AP_NETWORK) {
-        return -EINVAL;
-    }
-
-    if (down_interruptible(&ar->arSem)) {
-        return -ERESTARTSYS;
-    }
-
-    if (ar->bIsDestroyProgress) {
-        up(&ar->arSem);
-        return -EBUSY;
-    }
-
-    if (data->pointer && data->length == sizeof(struct iw_mlme)) {
-
-        A_UINT8 arNetworkType;
-        struct iw_mlme mlme;
-
-        if (copy_from_user(&mlme, data->pointer, sizeof(struct iw_mlme)))
-            return -EIO;
-
-        switch (mlme.cmd) {
-
-            case IW_MLME_DEAUTH:
-                /* ignore it */
-                break;
-
-            case IW_MLME_DISASSOC:
-                if ((ar->arConnected != TRUE) ||
-                    (memcmp(ar->arBssid, mlme.addr.sa_data, 6) != 0)) {
-
-                    up(&ar->arSem);
-                    return -EINVAL;
-                }
-                wmi_setPmkid_cmd(ar->arWmi, ar->arBssid, NULL, 0);
-                arNetworkType = ar->arNetworkType;
-                ar6000_init_profile_info(ar);
-                ar->arNetworkType = arNetworkType;
-                reconnect_flag = 0;
-                wmi_disconnect_cmd(ar->arWmi);
-                A_MEMZERO(ar->arSsid, sizeof(ar->arSsid));
-                ar->arSsidLen = 0;
-                if (ar->arSkipScan == FALSE) {
-                    A_MEMZERO(ar->arReqBssid, sizeof(ar->arReqBssid));
-                }
-                break;
-
-            case IW_MLME_AUTH:
-                /* fall through */
-            case IW_MLME_ASSOC:
-                /* fall through */
-            default:
-                up(&ar->arSem);
-                return -EOPNOTSUPP;
-        }
-    }
-
-    up(&ar->arSem);
-    return 0;
-}
-#endif /* LINUX_VERSION_CODE */
 
 /*
  * SIOCGIWAPLIST
@@ -2014,11 +1790,6 @@ ar6000_ioctl_siwscan(struct net_device *dev,
     AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
     int ret = 0;
 
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
     if (ar->arWmiReady == FALSE) {
         return -EIO;
     }
@@ -2027,39 +1798,24 @@ ar6000_ioctl_siwscan(struct net_device *dev,
         return -EIO;
     }
 
-     /* We ask for everything from the target */
+    /* We ask for everything from the target */
     if (wmi_bssfilter_cmd(ar->arWmi, ALL_BSS_FILTER, 0) != A_OK) {
-        printk("Couldn't set filtering\n");
-        ret = -EIO;
+	    printk("Couldn't set filtering\n");
+	    ret = -EIO;
     }
-
-#if WIRELESS_EXT >= 18
-    if (data->pointer && (data->length == sizeof(struct iw_scan_req)))
-    {
-        if ((data->flags & IW_SCAN_THIS_ESSID) == IW_SCAN_THIS_ESSID)
-        {
-            struct iw_scan_req req;
-            if (copy_from_user(&req, data->pointer, sizeof(struct iw_scan_req)))
-                return -EIO;
-            if (wmi_probedSsid_cmd(ar->arWmi, 1, SPECIFIC_SSID_FLAG, req.essid_len, req.essid) != A_OK)
-                return -EIO;
-        }
-        else
-        {
-            if (wmi_probedSsid_cmd(ar->arWmi, 1, DISABLE_SSID_FLAG, 0, NULL) != A_OK)
-                return -EIO;
-        }
-    }
-    else
-    {
-        if (wmi_probedSsid_cmd(ar->arWmi, 1, DISABLE_SSID_FLAG, 0, NULL) != A_OK)
-            return -EIO;
-    }
-#endif
 
     if (wmi_startscan_cmd(ar->arWmi, WMI_LONG_SCAN, FALSE, FALSE, \
-                          0, 0, 0, NULL) != A_OK) {
+                          HOME_TXDRAIN_TIME, SCAN_INT) != A_OK) {
         ret = -EIO;
+    }
+
+    ar->scan_complete = 0;
+    wait_event_interruptible_timeout(ar6000_scan_queue, ar->scan_complete,
+				     5 * HZ);
+
+    if (wmi_bssfilter_cmd(ar->arWmi, NONE_BSS_FILTER, 0) != A_OK) {
+	    printk("Couldn't set filtering\n");
+	    ret = -EIO;
     }
 
     return ret;
@@ -2104,59 +1860,9 @@ ar6000_set_quality(struct iw_quality *iq, A_INT8 rssi)
 }
 
 
-int
-ar6000_ioctl_siwcommit(struct net_device *dev,
-                     struct iw_request_info *info,
-                     struct iw_point *data, char *extra)
-{
-    AR_SOFTC_T *ar = (AR_SOFTC_T *)netdev_priv(dev);
-
-    if (is_iwioctl_allowed(ar->arNextMode, info->cmd) != A_OK) {
-        A_PRINTF("wext_ioctl: cmd=0x%x not allowed in this mode\n", info->cmd);
-        return -EOPNOTSUPP;
-    }
-
-    if (ar->arWmiReady == FALSE) {
-        return -EIO;
-    }
-
-    if (ar->arWlanState == WLAN_DISABLED) {
-        return -EIO;
-    }
-
-    AR_DEBUG_PRINTF("AP: SSID %s freq %d authmode %d dot11 auth %d"\
-                    " PW crypto %d GRP crypto %d\n",
-                    ar->arSsid, ar->arChannelHint,
-                    ar->arAuthMode, ar->arDot11AuthMode,
-                    ar->arPairwiseCrypto, ar->arGroupCrypto);
-
-    ar6000_ap_mode_profile_commit(ar);
-
-    /* if there is a profile switch from STA|IBSS mode to AP mode,
-     * update the host driver association state for the STA|IBSS mode.
-     */
-    if (ar->arNetworkType != AP_NETWORK && ar->arNextMode == AP_NETWORK) {
-        ar->arConnectPending = FALSE;
-        ar->arConnected = FALSE;
-        /* Stop getting pkts from upper stack */
-        netif_stop_queue(ar->arNetDev);
-        A_MEMZERO(ar->arBssid, sizeof(ar->arBssid));
-        ar->arBssChannel = 0;
-        ar->arBeaconInterval = 0;
-
-        /* Flush the Tx queues */
-        ar6000_TxDataCleanup(ar);
-
-        /* Start getting pkts from upper stack */
-        netif_wake_queue(ar->arNetDev);
-    }
-
-    return 0;
-}
-
 /* Structures to export the Wireless Handlers */
 static const iw_handler ath_handlers[] = {
-    (iw_handler) ar6000_ioctl_siwcommit,        /* SIOCSIWCOMMIT */
+    (iw_handler) NULL,                          /* SIOCSIWCOMMIT */
     (iw_handler) ar6000_ioctl_giwname,          /* SIOCGIWNAME */
     (iw_handler) NULL,                          /* SIOCSIWNWID */
     (iw_handler) NULL,                          /* SIOCGIWNWID */
@@ -2178,11 +1884,7 @@ static const iw_handler ath_handlers[] = {
     (iw_handler) NULL,                          /* SIOCGIWTHRSPY */
     (iw_handler) ar6000_ioctl_siwap,            /* SIOCSIWAP */
     (iw_handler) ar6000_ioctl_giwap,            /* SIOCGIWAP */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,13)
-    (iw_handler) ar6000_ioctl_siwmlme,          /* SIOCSIWMLME */
-#else
     (iw_handler) NULL,                          /* -- hole -- */
-#endif  /* LINUX_VERSION_CODE */
     (iw_handler) ar6000_ioctl_iwaplist,         /* SIOCGIWAPLIST */
     (iw_handler) ar6000_ioctl_siwscan,          /* SIOCSIWSCAN */
     (iw_handler) ar6000_ioctl_giwscan,          /* SIOCGIWSCAN */
@@ -2206,20 +1908,72 @@ static const iw_handler ath_handlers[] = {
     (iw_handler) ar6000_ioctl_giwencode,        /* SIOCGIWENCODE */
     (iw_handler) ar6000_ioctl_siwpower,         /* SIOCSIWPOWER */
     (iw_handler) ar6000_ioctl_giwpower,         /* SIOCGIWPOWER */
-    (iw_handler) NULL,  /* -- hole -- */
-    (iw_handler) NULL,  /* -- hole -- */
-    (iw_handler) ar6000_ioctl_siwgenie, /* SIOCSIWGENIE */
-    (iw_handler) ar6000_ioctl_giwgenie, /* SIOCGIWGENIE */
-    (iw_handler) ar6000_ioctl_siwauth,  /* SIOCSIWAUTH */
-    (iw_handler) ar6000_ioctl_giwauth,  /* SIOCGIWAUTH */
+    (iw_handler) NULL,	/* -- hole -- */
+    (iw_handler) NULL,	/* -- hole -- */
+    (iw_handler) ar6000_ioctl_siwgenie,	/* SIOCSIWGENIE */
+    (iw_handler) ar6000_ioctl_giwgenie,	/* SIOCGIWGENIE */
+    (iw_handler) ar6000_ioctl_siwauth,	/* SIOCSIWAUTH */
+    (iw_handler) ar6000_ioctl_giwauth,	/* SIOCGIWAUTH */
     (iw_handler) ar6000_ioctl_siwencodeext,/* SIOCSIWENCODEEXT */
     (iw_handler) ar6000_ioctl_giwencodeext,/* SIOCGIWENCODEEXT */
-    (iw_handler) NULL,      /* SIOCSIWPMKSA */
+    (iw_handler) NULL,		/* SIOCSIWPMKSA */
 };
+
+static const iw_handler ath_priv_handlers[] = {
+    (iw_handler) ar6000_ioctl_setparam,         /* SIOCWFIRSTPRIV+0 */
+    (iw_handler) ar6000_ioctl_getparam,         /* SIOCWFIRSTPRIV+1 */
+    (iw_handler) ar6000_ioctl_setkey,           /* SIOCWFIRSTPRIV+2 */
+    (iw_handler) ar6000_ioctl_setwmmparams,     /* SIOCWFIRSTPRIV+3 */
+    (iw_handler) ar6000_ioctl_delkey,           /* SIOCWFIRSTPRIV+4 */
+    (iw_handler) ar6000_ioctl_getwmmparams,     /* SIOCWFIRSTPRIV+5 */
+    (iw_handler) ar6000_ioctl_setoptie,         /* SIOCWFIRSTPRIV+6 */
+    (iw_handler) ar6000_ioctl_setmlme,          /* SIOCWFIRSTPRIV+7 */
+    (iw_handler) ar6000_ioctl_addpmkid,         /* SIOCWFIRSTPRIV+8 */
+};
+
+#define IW_PRIV_TYPE_KEY \
+    (IW_PRIV_TYPE_BYTE | sizeof(struct ieee80211req_key))
+#define IW_PRIV_TYPE_DELKEY \
+    (IW_PRIV_TYPE_BYTE | sizeof(struct ieee80211req_del_key))
+#define IW_PRIV_TYPE_MLME \
+    (IW_PRIV_TYPE_BYTE | sizeof(struct ieee80211req_mlme))
+#define IW_PRIV_TYPE_ADDPMKID \
+    (IW_PRIV_TYPE_BYTE | sizeof(struct ieee80211req_addpmkid))
+
+static const struct iw_priv_args ar6000_priv_args[] = {
+    { IEEE80211_IOCTL_SETKEY,
+      IW_PRIV_TYPE_KEY | IW_PRIV_SIZE_FIXED, 0,       "setkey"},
+    { IEEE80211_IOCTL_DELKEY,
+      IW_PRIV_TYPE_DELKEY | IW_PRIV_SIZE_FIXED, 0,    "delkey"},
+    { IEEE80211_IOCTL_SETPARAM,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0,   "setparam"},
+    { IEEE80211_IOCTL_GETPARAM,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,      "getparam"},
+    { IEEE80211_IOCTL_SETWMMPARAMS,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 4, 0,   "setwmmparams"},
+    { IEEE80211_IOCTL_GETWMMPARAMS,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,      "getwmmparams"},
+    { IEEE80211_IOCTL_SETOPTIE,
+      IW_PRIV_TYPE_BYTE, 0,       "setie"},
+    { IEEE80211_IOCTL_SETMLME,
+      IW_PRIV_TYPE_MLME, 0,       "setmlme"},
+    { IEEE80211_IOCTL_ADDPMKID,
+      IW_PRIV_TYPE_ADDPMKID | IW_PRIV_SIZE_FIXED, 0,  "addpmkid"},
+};
+
+void ar6000_ioctl_iwsetup(struct iw_handler_def *def)
+{
+    def->private_args = (struct iw_priv_args *)ar6000_priv_args;
+    def->num_private_args = ARRAY_SIZE(ar6000_priv_args);
+}
 
 struct iw_handler_def ath_iw_handler_def = {
     .standard         = (iw_handler *)ath_handlers,
     .num_standard     = ARRAY_SIZE(ath_handlers),
-    .private          = NULL,
-    .num_private      = 0,
+    .private          = (iw_handler *)ath_priv_handlers,
+    .num_private      = ARRAY_SIZE(ath_priv_handlers),
 };
+
+

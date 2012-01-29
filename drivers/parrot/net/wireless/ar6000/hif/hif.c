@@ -1,23 +1,24 @@
-//------------------------------------------------------------------------------
-// <copyright file="hif.c" company="Atheros">
-//    Copyright (c) 2004-2007 Atheros Corporation.  All rights reserved.
-// 
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License version 2 as
-// published by the Free Software Foundation;
-//
-// Software distributed under the License is distributed on an "AS
-// IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// rights and limitations under the License.
-//
-//
-//------------------------------------------------------------------------------
-//==============================================================================
-// HIF layer reference implementation for Atheros SDIO stack
-//
-// Author(s): ="Atheros"
-//==============================================================================
+/*
+ * @file: hif.c
+ *
+ * @abstract: HIF layer reference implementation for Atheros SDIO stack
+ *
+ * @notice: Copyright (c) 2004-2006 Atheros Communications Inc.
+ *
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 as
+ *  published by the Free Software Foundation;
+ *
+ *  Software distributed under the License is distributed on an "AS
+ *  IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ *  implied. See the License for the specific language governing
+ *  rights and limitations under the License.
+ *
+ *
+ *
+ */
+
 #include "hif_internal.h"
 
 /* ------ Static Variables ------ */
@@ -61,12 +62,6 @@ SD_PNP_INFO Ids[] = {
         .SDIO_FunctionNo = 1
     },
     {
-        .SDIO_ManufacturerID = MANUFACTURER_ID_AR6003_BASE | 0x0,
-        .SDIO_ManufacturerCode = MANUFACTURER_CODE,
-        .SDIO_FunctionClass = FUNCTION_CLASS,
-        .SDIO_FunctionNo = 1
-    },
-    {
     }                      //list is null termintaed
 };
 
@@ -85,15 +80,15 @@ TARGET_FUNCTION_CONTEXT FunctionContext = {
 };
 
 HIF_DEVICE hifDevice[HIF_MAX_DEVICES];
-OSDRV_CALLBACKS osdrvCallbacks;
+HTC_CALLBACKS htcCallbacks;
 BUS_REQUEST busRequest[BUS_REQUEST_MAX_NUM];
 static BUS_REQUEST *s_busRequestFreeQueue = NULL;
 OS_CRITICALSECTION lock;
 extern A_UINT32 onebitmode;
 extern A_UINT32 busspeedlow;
-extern A_UINT32 debughif;
 
 #ifdef DEBUG
+extern A_UINT32 debughif;
 #define ATH_DEBUG_ERROR 1
 #define ATH_DEBUG_WARN  2
 #define ATH_DEBUG_TRACE 3
@@ -112,20 +107,27 @@ static THREAD_RETURN insert_helper_func(POSKERNEL_HELPER pHelper);
 static void ResetAllCards(void);
 
 /* ------ Functions ------ */
-A_STATUS HIFInit(OSDRV_CALLBACKS *callbacks)
+int HIFInit(HTC_CALLBACKS *callbacks)
 {
     SDIO_STATUS status;
     DBG_ASSERT(callbacks != NULL);
 
-    /* store the callback handlers */
-    osdrvCallbacks = *callbacks;    
+    /* Store the callback and event handlers */
+    htcCallbacks.deviceInsertedHandler = callbacks->deviceInsertedHandler;
+    htcCallbacks.deviceRemovedHandler = callbacks->deviceRemovedHandler;
+    htcCallbacks.deviceSuspendHandler = callbacks->deviceSuspendHandler;
+    htcCallbacks.deviceResumeHandler = callbacks->deviceResumeHandler;
+    htcCallbacks.deviceWakeupHandler = callbacks->deviceWakeupHandler;
+    htcCallbacks.rwCompletionHandler = callbacks->rwCompletionHandler;
+    htcCallbacks.dsrHandler = callbacks->dsrHandler;
+
     CriticalSectionInit(&lock);
 
     /* Register with bus driver core */
     status = SDIO_RegisterFunction(&FunctionContext.function);
     DBG_ASSERT(SDIO_SUCCESS(status));
 
-    return SDIO_SUCCESS(status) ? A_OK : A_ERROR;
+    return(0);
 }
 
 A_STATUS
@@ -171,7 +173,6 @@ HIFReadWrite(HIF_DEVICE *device,
         } else if (request & HIF_ASYNCHRONOUS) {
             sdrequest->Flags = SDREQ_FLAGS_RESP_SDIO_R5 | SDREQ_FLAGS_DATA_TRANS |
                                SDREQ_FLAGS_TRANS_ASYNC;
-            busrequest->hifDevice = device;                   
             sdrequest->pCompleteContext = busrequest;
             sdrequest->pCompletion = hifRWCompletionHandler;
             AR_DEBUG_PRINTF(ATH_DEBUG_TRACE, ("Execution mode: Asynchronous\n"));
@@ -287,7 +288,7 @@ HIFReadWrite(HIF_DEVICE *device,
 
     if (A_FAILED(status) && (request & HIF_ASYNCHRONOUS)) {
             /* call back async handler on failure */
-        device->htcCallbacks.rwCompletionHandler(context, status);
+        htcCallbacks.rwCompletionHandler(context, status);
     }
 
     return status;
@@ -329,6 +330,7 @@ void
 HIFShutDownDevice(HIF_DEVICE *device)
 {
     A_UINT8 data;
+    A_UINT32 count;
     SDIO_STATUS status;
     SDCONFIG_BUS_MODE_DATA busSettings;
     SDCONFIG_FUNC_ENABLE_DISABLE_DATA fData;
@@ -374,6 +376,12 @@ HIFShutDownDevice(HIF_DEVICE *device)
             DBG_ASSERT(SDIO_SUCCESS(status));
         }
 
+        /* Free the bus requests */
+        for (count = 0; count < BUS_REQUEST_MAX_NUM; count ++) {
+            SDDeviceFreeRequest(device->handle, busRequest[count].request);
+        }
+        /* Clean up the queue */
+        s_busRequestFreeQueue = NULL;
     } else {
             /* since we are unloading the driver anyways, reset all cards in case the SDIO card
              * is externally powered and we are unloading the SDIO stack.  This avoids the problem when
@@ -394,7 +402,6 @@ hifRWCompletionHandler(SDREQUEST *request)
     A_STATUS status;
     void *context;
     BUS_REQUEST *busrequest;
-    HIF_DEVICE  *device;
 
     if (SDIO_SUCCESS(request->Status)) {
         status = A_OK;
@@ -405,13 +412,12 @@ hifRWCompletionHandler(SDREQUEST *request)
     DBG_ASSERT(status == A_OK);
     busrequest = (BUS_REQUEST *) request->pCompleteContext;
     context = (void *) busrequest->context;
-    device = busrequest->hifDevice;
         /* free the request before calling the callback, in case the
          * callback submits another request, this guarantees that
          * there is at least 1 free request available everytime the callback
          * is invoked */
     hifFreeBusRequest(busrequest);
-    device->htcCallbacks.rwCompletionHandler(context, status);
+    htcCallbacks.rwCompletionHandler(context, status);
 }
 
 void
@@ -422,7 +428,7 @@ hifIRQHandler(void *context)
 
     device = (HIF_DEVICE *)context;
     AR_DEBUG_PRINTF(ATH_DEBUG_TRACE, ("Device: %p\n", device));
-    status = device->htcCallbacks.dsrHandler(device->htcCallbacks.context);
+    status = htcCallbacks.dsrHandler(device->htc_handle);
     DBG_ASSERT(status == A_OK);
 }
 
@@ -627,8 +633,23 @@ hifDeviceInserted(SDFUNCTION *function, SDDEVICE *handle)
 
 static THREAD_RETURN insert_helper_func(POSKERNEL_HELPER pHelper)
 {
+
+    /*
+     * Adding a wait of around a second before we issue the very first
+     * command to dragon. During the process of loading/unloading the
+     * driver repeatedly it was observed that we get a data timeout
+     * while accessing function 1 registers in the chip. The theory at
+     * this point is that some initialization delay in dragon is
+     * causing the SDIO state in dragon core to be not ready even after
+     * the ready bit indicates that function 1 is ready. Accomodating
+     * for this behavior by adding some delay in the driver before it
+     * issues the first command after switching on dragon. Need to
+     * investigate this a bit more - TODO
+     */
+
+    A_MDELAY(1000);
         /* Inform HTC */
-    if ((osdrvCallbacks.deviceInsertedHandler(osdrvCallbacks.context,SD_GET_OS_HELPER_CONTEXT(pHelper))) != A_OK) {
+    if ((htcCallbacks.deviceInsertedHandler(SD_GET_OS_HELPER_CONTEXT(pHelper))) != A_OK) {
         AR_DEBUG_PRINTF(ATH_DEBUG_TRACE, ("Device rejected\n"));
     }
 
@@ -718,18 +739,13 @@ hifFreeBusRequest(BUS_REQUEST *busrequest)
 void
 hifDeviceRemoved(SDFUNCTION *function, SDDEVICE *handle)
 {
+    A_STATUS status;
     HIF_DEVICE *device;
-    A_UINT32 count;
-    
     DBG_ASSERT(function != NULL);
     DBG_ASSERT(handle != NULL);
 
     device = getHifDevice(handle);
-    
-    if (device->claimedContext != NULL) {
-            /* device was claimed, call the removal handler */
-        osdrvCallbacks.deviceRemovedHandler(device->claimedContext, device);
-    }
+    status = htcCallbacks.deviceRemovedHandler(device->htc_handle, A_OK);
 
         /* cleanup the helper thread */
     if (device->helper_started) {
@@ -737,17 +753,8 @@ hifDeviceRemoved(SDFUNCTION *function, SDDEVICE *handle)
         device->helper_started = FALSE;
     }
 
-    /* Free the bus requests */
-    for (count = 0; count < BUS_REQUEST_MAX_NUM; count ++) {
-        if (busRequest[count].request != NULL) {
-            SDDeviceFreeRequest(device->handle, busRequest[count].request);
-            busRequest[count].request = NULL;
-        }
-    }
-    /* Clean up the queue */
-    s_busRequestFreeQueue = NULL;
-        
-    delHifDevice(handle);  
+    delHifDevice(handle);
+    DBG_ASSERT(status == A_OK);
 }
 
 HIF_DEVICE *
@@ -770,6 +777,12 @@ delHifDevice(SDDEVICE *handle)
 {
     DBG_ASSERT(handle != NULL);
     hifDevice[0].handle = NULL;
+}
+
+struct device*
+HIFGetOSDevice(HIF_DEVICE *device)
+{
+    return &device->handle->Device->dev;
 }
 
 static void ResetAllCards(void)
@@ -801,28 +814,11 @@ static void ResetAllCards(void)
 
 }
 
-void HIFClaimDevice(HIF_DEVICE  *device, void *context)
+void HIFSetHandle(void *hif_handle, void *handle)
 {
-    device->claimedContext = context;   
-}
+    HIF_DEVICE *device = (HIF_DEVICE *) hif_handle;
 
-void HIFReleaseDevice(HIF_DEVICE  *device)
-{
-    device->claimedContext = NULL;    
-}
+    device->htc_handle = handle;
 
-A_STATUS HIFAttachHTC(HIF_DEVICE *device, HTC_CALLBACKS *callbacks)
-{
-    if (device->htcCallbacks.context != NULL) {
-            /* already in use! */
-        return A_ERROR;    
-    }
-    device->htcCallbacks = *callbacks; 
-    return A_OK;
+    return;
 }
-
-void HIFDetachHTC(HIF_DEVICE *device)
-{
-    A_MEMZERO(&device->htcCallbacks,sizeof(device->htcCallbacks));
-}
-

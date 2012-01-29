@@ -1,28 +1,29 @@
-//------------------------------------------------------------------------------
-// <copyright file="hif_internal.h" company="Atheros">
-//    Copyright (c) 2004-2007 Atheros Corporation.  All rights reserved.
-// 
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License version 2 as
-// published by the Free Software Foundation;
-//
-// Software distributed under the License is distributed on an "AS
-// IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// rights and limitations under the License.
-//
-//
-//------------------------------------------------------------------------------
-//==============================================================================
-// internal header file for hif layer
-//
-// Author(s): ="Atheros"
-//==============================================================================
+/*
+ * @file: hif_internal.h
+ *
+ * @abstract: internal header file for hif layer
+ *
+ * @notice: Copyright (c) 2004-2006 Atheros Communications Inc.
+ *
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 as
+ *  published by the Free Software Foundation;
+ *
+ *  Software distributed under the License is distributed on an "AS
+ *  IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ *  implied. See the License for the specific language governing
+ *  rights and limitations under the License.
+ *
+ *
+ *
+ */
+
+#include <linux/sdio/ctsystem.h>
+#include <linux/sdio/sdio_busdriver.h>
+#include <linux/sdio/_sdio_defs.h>
+#include <linux/sdio/sdio_lib.h>
 #include "a_config.h"
-#include "ctsystem.h"
-#include "sdio_busdriver.h"
-#include "_sdio_defs.h"
-#include "sdio_lib.h"
 #include "athdefs.h"
 #include "a_types.h"
 #include "a_osapi.h"
@@ -30,7 +31,6 @@
 
 #define MANUFACTURER_ID_AR6001_BASE        0x100
 #define MANUFACTURER_ID_AR6002_BASE        0x200
-#define MANUFACTURER_ID_AR6003_BASE        0x300
 #define FUNCTION_CLASS                     0x0
 #define MANUFACTURER_CODE                  0x271
 
@@ -57,8 +57,7 @@
 
 struct hif_device {
     SDDEVICE *handle;
-    void     *claimedContext;
-    HTC_CALLBACKS htcCallbacks;
+    void *htc_handle;
     OSKERNEL_HELPER insert_helper;
     BOOL  helper_started;
 };
@@ -73,7 +72,6 @@ typedef struct bus_request {
     struct bus_request *next;
     SDREQUEST *request;
     void *context;
-    HIF_DEVICE *hifDevice;
 } BUS_REQUEST;
 
 BOOL

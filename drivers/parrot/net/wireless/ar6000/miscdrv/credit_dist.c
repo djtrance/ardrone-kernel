@@ -1,21 +1,23 @@
-//------------------------------------------------------------------------------
-// <copyright file="credit_dist.c" company="Atheros">
-//    Copyright (c) 2004-2008 Atheros Corporation.  All rights reserved.
-// 
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License version 2 as
-// published by the Free Software Foundation;
-//
-// Software distributed under the License is distributed on an "AS
-// IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// rights and limitations under the License.
-//
-//
-//------------------------------------------------------------------------------
-//==============================================================================
-// Author(s): ="Atheros"
-//==============================================================================
+
+/*
+ *
+ * Copyright (c) 2004-2007 Atheros Communications Inc.
+ * All rights reserved.
+ *
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 as
+ *  published by the Free Software Foundation;
+ *
+ *  Software distributed under the License is distributed on an "AS
+ *  IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ *  implied. See the License for the specific language governing
+ *  rights and limitations under the License.
+ *
+ *
+ *
+ */
+
 #include "a_config.h"
 #include "athdefs.h"
 #include "a_types.h"
@@ -131,10 +133,10 @@ static void ar6000_credit_init(void                     *Context,
                  * the same.
                  * We use a simple calculation here, we take the remaining credits and
                  * determine how many max messages this can cover and then set each endpoint's
-                 * normal value equal to 3/4 this amount.
+                 * normal value equal to half this amount.
                  * */
             count = (pCredInfo->CurrentFreeCredits/pCurEpDist->TxCreditsPerMaxMsg) * pCurEpDist->TxCreditsPerMaxMsg;
-            count = (count * 3) >> 2;
+            count = count >> 1;
             count = max(count,pCurEpDist->TxCreditsPerMaxMsg);
                 /* set normal */
             pCurEpDist->TxCreditsNorm = count;
@@ -184,19 +186,12 @@ static void ar6000_credit_distribute(void                     *Context,
                             /* oversubscribed endpoints need to reduce back to normal */
                         ReduceCredits(pCredInfo, pCurEpDist, pCurEpDist->TxCreditsNorm);
                     }
-                
-                    if (!IS_EP_ACTIVE(pCurEpDist)) {
-                            /* endpoint is inactive, now check for messages waiting for credits */
-                        if (pCurEpDist->TxQueueDepth == 0) {
-                                /* EP is inactive and there are no pending messages, 
-                                 * reduce credits back to zero to recover credits */
-                            ReduceCredits(pCredInfo, pCurEpDist, 0);
-                        }
-                    }
                 }
 
                 pCurEpDist = pCurEpDist->pNext;
             }
+
+            A_ASSERT(pCredInfo->CurrentFreeCredits <= pCredInfo->TotalAvailableCredits);
 
             break;
 
@@ -207,17 +202,13 @@ static void ar6000_credit_distribute(void                     *Context,
             SeekCredits(pCredInfo,pEPDistList);
             break;
         case HTC_DUMP_CREDIT_STATE :
-            AR_DEBUG_PRINTF(ATH_DEBUG_ERR, ("Credit Distribution, total : %d, free : %d\n",
+            AR_DEBUG_PRINTF(ATH_LOG_INF, ("Credit Distribution, total : %d, free : %d\n",
             								pCredInfo->TotalAvailableCredits, pCredInfo->CurrentFreeCredits));
             break;
         default:
             break;
 
     }
-
-        /* sanity checks done after each distribution action */
-    A_ASSERT(pCredInfo->CurrentFreeCredits <= pCredInfo->TotalAvailableCredits);
-    A_ASSERT(pCredInfo->CurrentFreeCredits >= 0);
 
 }
 
@@ -232,15 +223,8 @@ static void RedistributeCredits(COMMON_CREDIT_STATE_INFO *pCredInfo,
 
         if (pCurEpDist->ServiceID != WMI_CONTROL_SVC) {
             if (!IS_EP_ACTIVE(pCurEpDist)) {
-                if (pCurEpDist->TxQueueDepth == 0) {
-                        /* EP is inactive and there are no pending messages, reduce credits back to zero */
-                    ReduceCredits(pCredInfo, pCurEpDist, 0);
-                } else {
-                        /* we cannot zero the credits assigned to this EP, but to keep
-                         * the credits available for these leftover packets, reduce to
-                         * a minimum */
-                    ReduceCredits(pCredInfo, pCurEpDist, pCurEpDist->TxCreditsMin);
-                }
+                    /* EP is inactive, reduce credits back to zero */
+                ReduceCredits(pCredInfo, pCurEpDist, 0);
             }
         }
 
@@ -250,6 +234,8 @@ static void RedistributeCredits(COMMON_CREDIT_STATE_INFO *pCredInfo,
 
         pCurEpDist = pCurEpDist->pNext;
     }
+
+    A_ASSERT(pCredInfo->CurrentFreeCredits <= pCredInfo->TotalAvailableCredits);
 
 }
 
@@ -270,26 +256,17 @@ static void SeekCredits(COMMON_CREDIT_STATE_INFO *pCredInfo,
             break;
         }
 
-        if (pEPDist->ServiceID == WMI_DATA_VI_SVC) {
-            if (pEPDist->TxCreditsAssigned >= pEPDist->TxCreditsNorm) {
-                 /* limit VI service from oversubscribing */
-                 break;
-            }
-        }
- 
-        if (pEPDist->ServiceID == WMI_DATA_VO_SVC) {
-            if (pEPDist->TxCreditsAssigned >= pEPDist->TxCreditsNorm) {
-                 /* limit VO service from oversubscribing */
-                break;
-            }
-        }
-
         /* for all other services, we follow a simple algorithm of
          * 1. checking the free pool for credits
          * 2. checking lower priority endpoints for credits to take */
 
-            /* give what we can */
-        credits = min(pCredInfo->CurrentFreeCredits,pEPDist->TxCreditsSeek);
+        if (pCredInfo->CurrentFreeCredits >= 2 * pEPDist->TxCreditsSeek) {
+                /* try to give more credits than it needs */
+            credits = 2 * pEPDist->TxCreditsSeek;
+        } else {
+                /* give what we can */
+            credits = min(pCredInfo->CurrentFreeCredits,pEPDist->TxCreditsSeek);
+        }
 
         if (credits >= pEPDist->TxCreditsSeek) {
                 /* we found some to fullfill the seek request */
@@ -313,7 +290,7 @@ static void SeekCredits(COMMON_CREDIT_STATE_INFO *pCredInfo,
                 /* calculate how many we need so far */
             need = pEPDist->TxCreditsSeek - pCredInfo->CurrentFreeCredits;
 
-            if ((pCurEpDist->TxCreditsAssigned - need) >= pCurEpDist->TxCreditsMin) {
+            if ((pCurEpDist->TxCreditsAssigned - need) > pCurEpDist->TxCreditsMin) {
                     /* the current one has been allocated more than it's minimum and it
                      * has enough credits assigned above it's minimum to fullfill our need
                      * try to take away just enough to fullfill our need */

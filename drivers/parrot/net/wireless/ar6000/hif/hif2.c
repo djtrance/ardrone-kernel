@@ -26,8 +26,6 @@
 #include <linux/mmc/sdio_func.h>
 #include <linux/mmc/sdio.h>
 #include <linux/mmc/sdio_ids.h>
-#include <linux/mmc/card.h>
-#include <linux/mmc/host.h>
 
 #include "athdefs.h"
 #include "a_types.h"
@@ -49,7 +47,6 @@
 
 #endif /* !CONFIG_MACH_NEO1973_GTA02 */
 
-struct device *HIFGetOSDevice(HIF_DEVICE *hif);
 
 /*
  * KNOWN BUGS:
@@ -110,8 +107,6 @@ struct hif_device {
 	spinlock_t queue_lock;
 	struct task_struct *io_task;
 	wait_queue_head_t wait;
-	HTC_CALLBACKS htcCallbacks;
-	void     *claimedContext;
 
 	/*
 	 * activate_lock protects "active" and the activation/deactivation
@@ -140,7 +135,7 @@ struct hif_request {
 };
 
 
-static OSDRV_CALLBACKS osdrvCallbacks;
+static HTC_CALLBACKS htcCallbacks;
 
 /*
  * shutdown_lock prevents recursion through HIFShutDownDevice
@@ -222,8 +217,8 @@ static void wait_queue_empty(struct hif_device *hif)
 static int io(void *data)
 {
 	struct hif_device *hif = data;
-	struct sched_param param = { .sched_priority = 30 };
-		/* one priority level slower than ksdioirqd (which is at 1 or 29) */
+	struct sched_param param = { .sched_priority = 2 };
+		/* one priority level slower than ksdioirqd (which is at 1) */
 	DEFINE_WAIT(wait);
 	struct hif_request *req;
 
@@ -281,7 +276,7 @@ A_STATUS HIFReadWrite(HIF_DEVICE *hif, A_UINT32 address, A_UCHAR *buffer,
 	req = kzalloc(sizeof(*req), GFP_ATOMIC);
 	if (!req) {
 		if (request & HIF_ASYNCHRONOUS)
-			hif->htcCallbacks.rwCompletionHandler(context, A_ERROR);
+			htcCallbacks.rwCompletionHandler(context, A_ERROR);
 		return A_ERROR;
 	}
 
@@ -305,7 +300,7 @@ A_STATUS HIFReadWrite(HIF_DEVICE *hif, A_UINT32 address, A_UCHAR *buffer,
 	if (!(request & HIF_ASYNCHRONOUS))
 		return process_request(req);
 
-	req->completion = hif->htcCallbacks.rwCompletionHandler;
+	req->completion = htcCallbacks.rwCompletionHandler;
 	req->context = context;
 	enqueue_request(hif, req);
 
@@ -333,9 +328,9 @@ static void ar6000_do_irq(struct sdio_func *func)
 	struct device *dev = HIFGetOSDevice(hif);
 	A_STATUS status;
 
-	dev_dbg(dev, "ar6000_do_irq -> %p\n", hif->htcCallbacks.context);
+	dev_dbg(dev, "ar6000_do_irq -> %p\n", htcCallbacks.dsrHandler);
 
-	status = hif->htcCallbacks.dsrHandler(hif->htcCallbacks.context);
+	status = htcCallbacks.dsrHandler(hif->htc_handle);
 	BUG_ON(status != A_OK);
 }
 
@@ -349,13 +344,8 @@ static void sdio_ar6000_irq(struct sdio_func *func)
 
 	in_interrupt = 1;
 	if (masked) {
-		struct mmc_host *host = func->card->host;
 		in_interrupt = 0;
 		pending++;
-		mmc_release_host(host);
-		msleep(1);
-		yield();
-		__mmc_claim_host(host, &host->sdio_irq_thread_abort);
 		return;
 	}
 	/*
@@ -487,11 +477,9 @@ static int ar6000_do_activate(struct hif_device *hif)
 	int ret;
 
 	dev_dbg(dev, "ar6000_do_activate\n");
-	msleep(1000);
 
 	sdio_claim_host(func);
 	sdio_enable_func(func);
-	msleep(1000);
 
 	INIT_LIST_HEAD(&hif->queue);
 	init_waitqueue_head(&hif->wait);
@@ -529,7 +517,7 @@ static int ar6000_do_activate(struct hif_device *hif)
 		goto out_func_ready;
 	}
 
-	ret = osdrvCallbacks.deviceInsertedHandler(osdrvCallbacks.context, hif);
+	ret = htcCallbacks.deviceInsertedHandler(hif);
 	if (ret == A_OK)
 		return 0;
 
@@ -562,12 +550,6 @@ static void ar6000_do_deactivate(struct hif_device *hif)
 	dev_dbg(dev, "ar6000_do_deactivate\n");
 	if (!hif->active)
 		return;
-#if 0
-	if (device->claimedContext != NULL) {
-		/* device was claimed, call the removal handler */
-		osdrvCallbacks.deviceRemovedHandler(device->claimedContext, device);
-	}
-#endif
 
 	if (mutex_trylock(&shutdown_lock)) {
 		/*
@@ -578,7 +560,7 @@ static void ar6000_do_deactivate(struct hif_device *hif)
 		 * However, we need it for suspend/resume. See the comment at
 		 * HIFShutDown, below.
 		 */
-		ret = osdrvCallbacks.deviceRemovedHandler(hif->claimedContext, hif);
+		ret = htcCallbacks.deviceRemovedHandler(hif->htc_handle, A_OK);
 		if (ret != A_OK)
 			dev_err(dev, "deviceRemovedHandler: %d\n", ret);
 		mutex_unlock(&shutdown_lock);
@@ -649,7 +631,7 @@ static int sdio_ar6000_probe(struct sdio_func *func,
 	int ret = 0;
 
 	dev_dbg(dev, "sdio_ar6000_probe\n");
-	BUG_ON(!osdrvCallbacks.deviceInsertedHandler);
+	BUG_ON(!htcCallbacks.deviceInsertedHandler);
 
 	hif = kzalloc(sizeof(*hif), GFP_KERNEL);
 	if (!hif)
@@ -688,9 +670,6 @@ static void sdio_ar6000_remove(struct sdio_func *func)
 
 /* ----- Device registration/unregistration (called by HIF) ---------------- */
 
-#define SDIO_VENDOR_ID_ATHEROS			0x0271
-#define SDIO_DEVICE_ID_ATHEROS_AR6001		0x0100
-#define SDIO_DEVICE_ID_ATHEROS_AR6002		0x0200
 
 #define ATHEROS_SDIO_DEVICE(id, offset) \
     SDIO_DEVICE(SDIO_VENDOR_ID_ATHEROS, SDIO_DEVICE_ID_ATHEROS_##id | (offset))
@@ -716,14 +695,14 @@ static struct sdio_driver sdio_ar6000_driver = {
 };
 
 
-A_STATUS HIFInit(OSDRV_CALLBACKS *callbacks)
+int HIFInit(HTC_CALLBACKS *callbacks)
 {
 	int ret;
 
 	BUG_ON(!callbacks);
 
 	printk(KERN_DEBUG "HIFInit\n");
-	osdrvCallbacks = *callbacks;
+	htcCallbacks = *callbacks;
 
 	ret = sdio_register_driver(&sdio_ar6000_driver);
 	if (ret) {
@@ -787,29 +766,3 @@ void HIFShutDownDevice(HIF_DEVICE *hif)
 		mutex_unlock(&shutdown_lock);
 	}
 }
-
-void HIFClaimDevice(HIF_DEVICE  *device, void *context)
-{
-    device->claimedContext = context;   
-}
-
-void HIFReleaseDevice(HIF_DEVICE  *device)
-{
-    device->claimedContext = NULL;    
-}
-
-A_STATUS HIFAttachHTC(HIF_DEVICE *device, HTC_CALLBACKS *callbacks)
-{
-    if (device->htcCallbacks.context != NULL) {
-            /* already in use! */
-        return A_ERROR;    
-    }
-    device->htcCallbacks = *callbacks; 
-    return A_OK;
-}
-
-void HIFDetachHTC(HIF_DEVICE *device)
-{
-    A_MEMZERO(&device->htcCallbacks,sizeof(device->htcCallbacks));
-}
-

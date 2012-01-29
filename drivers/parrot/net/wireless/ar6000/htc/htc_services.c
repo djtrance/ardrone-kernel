@@ -1,21 +1,22 @@
-//------------------------------------------------------------------------------
-// <copyright file="htc_services.c" company="Atheros">
-//    Copyright (c) 2007-2008 Atheros Corporation.  All rights reserved.
-// 
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License version 2 as
-// published by the Free Software Foundation;
-//
-// Software distributed under the License is distributed on an "AS
-// IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// rights and limitations under the License.
-//
-//
-//------------------------------------------------------------------------------
-//==============================================================================
-// Author(s): ="Atheros"
-//==============================================================================
+/*
+ *
+ * Copyright (c) 2007 Atheros Communications Inc.
+ * All rights reserved.
+ *
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 as
+ *  published by the Free Software Foundation;
+ *
+ *  Software distributed under the License is distributed on an "AS
+ *  IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ *  implied. See the License for the specific language governing
+ *  rights and limitations under the License.
+ *
+ *
+ *
+ */
+
 #include "htc_internal.h"
 
 void HTCControlTxComplete(void *Context, HTC_PACKET *pPacket)
@@ -30,12 +31,6 @@ void HTCControlRecv(void *Context, HTC_PACKET *pPacket)
 {
     AR_DEBUG_ASSERT(pPacket->Endpoint == ENDPOINT_0);
 
-    if (pPacket->Status == A_ECANCELED) {
-        /* this is a flush operation, return the control packet back to the pool */
-        HTC_FREE_CONTROL_RX((HTC_TARGET*)Context,pPacket);    
-        return;
-    }  
-    
         /* the only control messages we are expecting are NULL messages (credit resports), which should
          * never get here */
     AR_DEBUG_PRINTF(ATH_DEBUG_ERR,
@@ -47,7 +42,7 @@ void HTCControlRecv(void *Context, HTC_PACKET *pPacket)
                    pPacket->ActualLength + HTC_HDR_LENGTH,
                    "Unexpected ENDPOINT 0 Message");
 
-    HTC_RECYCLE_RX_PKT((HTC_TARGET*)Context,pPacket,&((HTC_TARGET*)Context)->EndPoint[0]);
+    HTC_RECYCLE_RX_PKT((HTC_TARGET*)Context,pPacket);
 }
 
 A_STATUS HTCSendSetupComplete(HTC_TARGET *target)
@@ -186,7 +181,7 @@ A_STATUS HTCConnectService(HTC_HANDLE               HTCHandle,
                 break;
             }
 
-            assignedEndpoint = (HTC_ENDPOINT_ID) pResponseMsg->EndpointID;
+            assignedEndpoint = pResponseMsg->EndpointID;
             maxMsgSize = pResponseMsg->MaxMsgSize;
 
             if ((pConnectResp->pMetaData != NULL) &&

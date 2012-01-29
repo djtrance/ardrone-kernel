@@ -27,7 +27,6 @@ ar6000-objs += htc/ar6k.o      		   \
                ar6000/ar6000_raw_if.o	   \
                ar6000/netbuf.o		   \
                ar6000/wireless_ext.o	   \
-               ar6000/engine.o		   \
                ar6000/ioctl.o		   \
                miscdrv/common_drv.o	   \
                miscdrv/credit_dist.o	   \
